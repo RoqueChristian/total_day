@@ -13,24 +13,29 @@ st.set_page_config(
 # -----------------------------------------------------------------------------
 # 1. DATA INGESTION & CACHING (Performance Tuning)
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=300) # Cache expira a cada 5 minutos para atualizar dados do evento
+@st.cache_data(ttl=300)
 def load_data():
-    """
-    Função responsável por ingerir os dados físicos (.xlsx) e criar a camada 
-    semântica em memória. Utiliza cache para otimizar o I/O.
-    """
     # Carregamento das Dimensões
     dim_rca = pd.read_excel("data/dim_rca.xlsx")
     dim_tv = pd.read_excel("data/dim_televendas.xlsx")
     
-    # Carregamento das Metas (Fato Metas)
+    # Carregamento das Metas
     meta_rca = pd.read_excel("data/meta_rca.xlsx")
     meta_tv = pd.read_excel("data/meta_televendas.xlsx")
     
-    # Carregamento das Vendas (Fato Vendas)
+    # Carregamento das Vendas
     fat = pd.read_excel("data/fat_total_day.xlsx")
     
-    # Garantir tipagem correta para evitar erros de merge
+    # ---> ADICIONE ESTAS LINHAS AQUI <---
+    # Normalizar os nomes das colunas para minúsculas para evitar erros com o Oracle
+    dim_rca.columns = [col.lower() for col in dim_rca.columns]
+    dim_tv.columns = [col.lower() for col in dim_tv.columns]
+    meta_rca.columns = [col.lower() for col in meta_rca.columns]
+    meta_tv.columns = [col.lower() for col in meta_tv.columns]
+    fat.columns = [col.lower() for col in fat.columns]
+    # -----------------------------------
+    
+    # Garantir tipagem correta
     meta_rca['meta'] = pd.to_numeric(meta_rca['meta'], errors='coerce').fillna(0)
     meta_tv['meta'] = pd.to_numeric(meta_tv['meta'], errors='coerce').fillna(0)
     fat['valor_venda'] = pd.to_numeric(fat['valor_venda'], errors='coerce').fillna(0)
