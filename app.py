@@ -12,6 +12,63 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
+# INJEÇÃO DE ESTILO CUSTOMIZADO (Clean UI / UX)
+# -----------------------------------------------------------------------------
+def inject_custom_css():
+    """
+    Injeta CSS customizado no frontend do Streamlit para ocultar elementos
+    padrões e estilizar os cartões de métrica de forma profissional.
+    """
+    st.markdown("""
+        <style>
+        /* Oculta a barra superior padrão (menu sanduíche, botão deploy e gap de espaço) */
+        header, [data-testid="stHeader"] {
+            visibility: hidden;
+            height: 0% !important;
+            padding: 0px !important;
+        }
+        
+        /* Ajuste de padding: otimiza o espaço vertical da tela operacional */
+        .block-container { 
+            padding-top: 1.5rem !important; 
+            padding-bottom: 1rem !important; 
+            max-width: 95% !important; 
+        }
+        
+        /* Estilização Avançada dos Cartões de KPI (Agnóstico ao Tema Dark/Light) */
+        [data-testid="stMetricValue"] { 
+            font-size: 28px !important; 
+            font-weight: bold; 
+        }
+        
+        [data-testid="stMetric"] { 
+            background-color: var(--secondary-background-color); 
+            padding: 15px; 
+            border-radius: 8px; 
+            border: 1px solid rgba(128, 128, 128, 0.2); 
+            box-shadow: 2px 2px 10px rgba(0,0,0,0.05); 
+            min-height: 145px !important; /* Fix: Garante simetria visual */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        
+        /* Alinhamento vertical interno do cartão */
+        [data-testid="stMetric"] > div {
+            margin-top: auto;
+            margin-bottom: auto;
+        }
+        
+        /* Centralização vertical de logos no cabeçalho */
+        .logo-container {
+            display: flex;
+            align-items: center;
+            height: 100%;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
 # 1. DATA INGESTION & CACHING (Performance Tuning)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=300)
@@ -103,6 +160,8 @@ def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
 def main():
 
     st_autorefresh(interval=60000, limit=500, key="data_refresh")
+
+    inject_custom_css()
 
     st.title("🚀 Cockpit TOTAL Day")
     st.markdown("Acompanhamento de Faturamento e Atingimento de Metas")
