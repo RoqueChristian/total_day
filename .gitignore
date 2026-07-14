@@ -1,0 +1,8 @@
+# ==========================================
+# 1. AMBIENTES VIRTUAIS E CREDENCIAIS
+# ==========================================
+venv/
+env/
+.env
+.streamlit/secrets.toml
+
