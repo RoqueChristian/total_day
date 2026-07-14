@@ -174,14 +174,13 @@ def main():
 
     st.divider()
 
-    # --- ESTRUTURA DE ABAS (Adicionada a Aba de Filiais) ---
+    # --- ESTRUTURA DE ABAS ---
     tab_rca, tab_tv, tab_filial = st.tabs([
         "📊 Performance RCA", 
         "🎧 Performance Televendas", 
         "🏢 Performance por Filial"
     ])
 
-    # Configuração de Colunas do Dataframe
     column_config = {
         "Filial": st.column_config.NumberColumn("Filial", format="%d"),
         "Meta": st.column_config.NumberColumn("Meta", format="R$ %.2f"),
@@ -195,30 +194,79 @@ def main():
         )
     }
 
+    # --- ABA 1: RCA ---
     with tab_rca:
         st.subheader("Força de Vendas Externa (RCA)")
+        
+        # 1. Cria a lista com a opção "Todas" no índice 0
+        lista_filiais_rca = ["Todas"] + sorted(df_rca_final['Filial'].unique().tolist())
+        
+        filtro_rca = st.selectbox(
+            "Filtrar Filial (RCA):", 
+            options=lista_filiais_rca, 
+            index=0, # Inicia selecionado em "Todas"
+            key="filtro_tab_rca"
+        )
+        
+        # 2. Lógica Condicional de Filtro
+        if filtro_rca == "Todas":
+            df_rca_filtrado = df_rca_final
+        else:
+            df_rca_filtrado = df_rca_final[df_rca_final['Filial'] == filtro_rca]
+            
         st.dataframe(
-            df_rca_final.sort_values(by='% Atingimento', ascending=False), 
+            df_rca_filtrado.sort_values(by='% Atingimento', ascending=False), 
             use_container_width=True, 
             hide_index=True,
             column_config=column_config
         )
 
+    # --- ABA 2: TELEVENDAS ---
     with tab_tv:
         st.subheader("Vendas Internas (Televendas)")
+        
+        lista_filiais_tv = ["Todas"] + sorted(df_tv_final['Filial'].unique().tolist())
+        
+        filtro_tv = st.selectbox(
+            "Filtrar Filial (Televendas):", 
+            options=lista_filiais_tv, 
+            index=0, 
+            key="filtro_tab_tv"
+        )
+        
+        if filtro_tv == "Todas":
+            df_tv_filtrado = df_tv_final
+        else:
+            df_tv_filtrado = df_tv_final[df_tv_final['Filial'] == filtro_tv]
+            
         st.dataframe(
-            df_tv_final.sort_values(by='% Atingimento', ascending=False), 
+            df_tv_filtrado.sort_values(by='% Atingimento', ascending=False), 
             use_container_width=True, 
             hide_index=True,
             column_config=column_config
         )
 
-    # Nova Aba: Performance por Filial Consolidada
+    # --- ABA 3: CONSOLIDADO POR FILIAL ---
     with tab_filial:
         st.subheader("Consolidado de Metas e Vendas por Filial")
         df_filial_final = get_branch_performance(df_rca_final, df_tv_final)
+        
+        lista_filiais_geral = ["Todas"] + sorted(df_filial_final['Filial'].unique().tolist())
+        
+        filtro_filial = st.selectbox(
+            "Visualizar Filial Específica:", 
+            options=lista_filiais_geral, 
+            index=0, 
+            key="filtro_tab_consolidado"
+        )
+        
+        if filtro_filial == "Todas":
+            df_filial_filtrado = df_filial_final
+        else:
+            df_filial_filtrado = df_filial_final[df_filial_final['Filial'] == filtro_filial]
+            
         st.dataframe(
-            df_filial_final, 
+            df_filial_filtrado, 
             use_container_width=True, 
             hide_index=True,
             column_config=column_config
