@@ -270,6 +270,7 @@ def main():
             use_container_width=True, 
             hide_index=True,
             column_config=column_config
+            
         )
 
 if __name__ == "__main__":
