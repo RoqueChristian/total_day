@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from streamlit_autorefresh import st_autorefresh
 
 # Configuração da página (deve ser o primeiro comando Streamlit)
 st.set_page_config(
-    page_title="Dashboard Evento de Vendas",
+    page_title="Dashboard TOTAL Day",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -100,8 +101,11 @@ def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
 # 3. UI EXECUTIVA & RENDERIZAÇÃO
 # -----------------------------------------------------------------------------
 def main():
-    st.title("🚀 Cockpit do Evento de Vendas")
-    st.markdown("Acompanhamento *Intraday* de Faturamento e Atingimento de Metas")
+
+    st_autorefresh(interval=60000, limit=500, key="data_refresh")
+
+    st.title("🚀 Cockpit TOTAL Day")
+    st.markdown("Acompanhamento de Faturamento e Atingimento de Metas")
     st.divider()
 
     # Executa a pipeline de dados
