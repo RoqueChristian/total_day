@@ -66,7 +66,7 @@ def inject_custom_css():
 def load_data():
     """
     Carrega as dimensões e tabelas fato a partir do diretório local.
-    Normaliza todas as colunas para minúsculo para mitigar quebras do Oracle.
+    Normaliza todas as colunas (lower + strip) para mitigar quebras do Oracle.
     """
     dim_rca = pd.read_excel("data/dim_rca.xlsx")
     dim_tv = pd.read_excel("data/dim_televendas.xlsx")
@@ -74,11 +74,12 @@ def load_data():
     meta_tv = pd.read_excel("data/meta_televendas.xlsx")
     fat = pd.read_excel("data/fat_total_day.xlsx")
     
-    # Normalização preventiva de nomenclatura e coerção de tipos dimensionais
+    # Normalização preventiva extrema de nomenclatura (Data Quality)
     for df in [dim_rca, dim_tv, meta_rca, meta_tv, fat]:
-        df.columns = [col.lower() for col in df.columns]
+        # Strip remove espaços acidentais no início ou fim do nome da coluna
+        df.columns = [str(col).strip().lower() for col in df.columns]
         
-        # Data Quality: Força a tipagem de 'filial' para string para suportar alfanuméricos (ex: 'PI', 'MA')
+        # Data Quality: Força a tipagem de 'filial' para string
         if 'filial' in df.columns:
             df['filial'] = df['filial'].astype(str)
             
@@ -94,7 +95,6 @@ def load_data():
 # -----------------------------------------------------------------------------
 def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
     # --- Pipeline RCA ---
-    # RCA consolida faturamento de TODAS as origens de pedido
     fat_rca = fat.groupby('cod_rca')['valor_venda'].sum().reset_index()
     
     # 1. Utiliza dim_rca como tabela base
@@ -129,7 +129,7 @@ def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
     if 'origem_pedido' in fat.columns:
         fat_tv_raw = fat[fat['origem_pedido'].astype(str).str.strip().str.upper() == 'TELEMARKETING']
     else:
-        fat_tv_raw = fat # Fallback caso a query do banco não traga a coluna temporariamente
+        fat_tv_raw = fat
         
     fat_tv = fat_tv_raw.groupby('cod_televendas')['valor_venda'].sum().reset_index()
     
@@ -144,13 +144,11 @@ def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
     return df_rca_final, df_tv_final
 
 # -----------------------------------------------------------------------------
-# CONSOLIDAÇÃO GEOGRÁFICA (Filial) - REESCRITA PARA MITIGAR DOUBLE-COUNTING
+# CONSOLIDAÇÃO GEOGRÁFICA (Filial) 
 # -----------------------------------------------------------------------------
 def get_branch_performance(dim_rca, meta_rca, fat):
     """
     Consolida o faturamento e meta global por filial.
-    Utiliza estritamente o RCA como SSOT (Single Source of Truth), 
-    pois todo faturamento de Televendas já está embarcado no RCA dono do cliente.
     """
     # 1. METAS GLOBAIS DA FILIAL (Apenas meta_rca)
     df_meta = meta_rca.groupby('filial')['meta'].sum().reset_index() if 'filial' in meta_rca.columns else pd.DataFrame(columns=['filial', 'meta'])
@@ -198,11 +196,10 @@ def main():
         dim_rca, dim_tv, meta_rca, meta_tv, fat = load_data()
         df_rca_final, df_tv_final = process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat)
     except Exception as e:
-        st.error(f"Erro na ingestão de dados. Verifique a estrutura da pasta 'data/'. Detalhe: {e}")
+        st.error(f"Erro na ingestão de dados. Verifique a estrutura da pasta 'data/'. Detalhe técnico: {e}")
         return
 
     # --- CARDS EXECUTIVOS ---
-    # KPIs baseados puramente na meta do RCA e no Fato integral, abolindo double-counting.
     meta_total = meta_rca['meta'].sum() 
     venda_total = fat['valor_venda'].sum() 
     pct_geral = (venda_total / meta_total) if meta_total > 0 else 0
@@ -243,13 +240,16 @@ def main():
     with tab_rca:
         st.subheader("Força de Vendas Externa (RCA)")
         
-        lista_filiais_rca = ["Todas"] + sorted(df_rca_final['Filial'].unique().tolist())
+        # Data Governance: Aplicação de Regra de Negócio isolada na View (Corte de Meta >= 15k)
+        df_rca_view = df_rca_final[df_rca_final['Meta'] >= 15000].copy()
+        
+        lista_filiais_rca = ["Todas"] + sorted(df_rca_view['Filial'].unique().tolist())
         filtro_rca = st.selectbox("Filtrar Filial (RCA):", options=lista_filiais_rca, index=0, key="filtro_tab_rca")
         
         if filtro_rca == "Todas":
-            df_rca_filtrado = df_rca_final
+            df_rca_filtrado = df_rca_view
         else:
-            df_rca_filtrado = df_rca_final[df_rca_final['Filial'] == filtro_rca]
+            df_rca_filtrado = df_rca_view[df_rca_view['Filial'] == filtro_rca]
             
         st.dataframe(
             df_rca_filtrado.sort_values(by='% Atingimento', ascending=False), 
@@ -281,7 +281,6 @@ def main():
     with tab_filial:
         st.subheader("Consolidado de Metas e Vendas por Filial")
         
-        # Chamada refatorada recebendo apenas estruturas do RCA
         df_filial_final = get_branch_performance(dim_rca, meta_rca, fat)
         
         lista_filiais_geral = ["Todas"] + sorted(df_filial_final['Filial'].unique().tolist())
