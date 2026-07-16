@@ -62,7 +62,7 @@ def inject_custom_css():
 # -----------------------------------------------------------------------------
 # CARREGAMENTO E SANEAMENTO DOS DADOS (Data Ingestion & Normalization)
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900)
 def load_data():
     """
     Carrega as dimensões e tabelas fato a partir do diretório local.
