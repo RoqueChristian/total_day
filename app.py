@@ -118,7 +118,9 @@ def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
     df_rca['meta'] = df_rca['meta'].fillna(0)
     df_rca['valor_venda'] = df_rca['valor_venda'].fillna(0)
     df_rca['valor_pedido'] = df_rca['valor_pedido'].fillna(0)
-    df_rca['pct_atingimento'] = np.where(df_rca['meta'] > 0, df_rca['valor_venda'] / df_rca['meta'], 0)
+    
+    # REGRA DE NEGÓCIO: % Atingimento agora é calculado sobre o VALOR PEDIDO
+    df_rca['pct_atingimento'] = np.where(df_rca['meta'] > 0, df_rca['valor_pedido'] / df_rca['meta'], 0)
     
     # 5. Filtro de Origem (Apenas perfil RCA)
     if 'origem' in df_rca.columns:
@@ -139,15 +141,21 @@ def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
     else:
         fat_tv_raw = fat
         
-    fat_tv = fat_tv_raw.groupby('cod_televendas')['valor_venda'].sum().reset_index()
+    # Agrega ambas as métricas para o Televendas
+    fat_tv = fat_tv_raw.groupby('cod_televendas')[['valor_venda', 'valor_pedido']].sum().reset_index()
     
     df_tv = pd.merge(meta_tv, dim_tv, left_on='cod_televenda', right_on='codigo_televendas', how='left')
     df_tv = pd.merge(df_tv, fat_tv, left_on='cod_televenda', right_on='cod_televendas', how='left')
-    df_tv['valor_venda'] = df_tv['valor_venda'].fillna(0)
-    df_tv['pct_atingimento'] = np.where(df_tv['meta'] > 0, df_tv['valor_venda'] / df_tv['meta'], 0)
     
-    df_tv_final = df_tv[['filial', 'nm_televendas', 'meta', 'valor_venda', 'pct_atingimento']].copy()
-    df_tv_final.columns = ['Filial', 'Nome', 'Meta', 'Valor Venda', '% Atingimento']
+    df_tv['valor_venda'] = df_tv['valor_venda'].fillna(0)
+    df_tv['valor_pedido'] = df_tv['valor_pedido'].fillna(0)
+    
+    # REGRA DE NEGÓCIO: % Atingimento agora é calculado sobre o VALOR PEDIDO
+    df_tv['pct_atingimento'] = np.where(df_tv['meta'] > 0, df_tv['valor_pedido'] / df_tv['meta'], 0)
+    
+    # Adicionada a coluna 'valor_pedido' na View do Televendas
+    df_tv_final = df_tv[['filial', 'nm_televendas', 'meta', 'valor_pedido', 'valor_venda', 'pct_atingimento']].copy()
+    df_tv_final.columns = ['Filial', 'Nome', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']
     
     return df_rca_final, df_tv_final
 
@@ -163,29 +171,34 @@ def get_branch_performance(dim_rca, meta_rca, fat):
     df_meta.rename(columns={'meta': 'Meta'}, inplace=True)
     
     # 2. FATURAMENTO GLOBAL DA FILIAL (Mapeado unicamente pela dim_rca)
-    fat_rca = fat.groupby('cod_rca')['valor_venda'].sum().reset_index()
-    df_v_rca = pd.merge(dim_rca[['codigo_rca', 'filial']], fat_rca, left_on='codigo_rca', right_on='cod_rca', how='left').fillna({'valor_venda': 0})
+    # Agrega ambas as métricas e preenche os NAs
+    fat_rca = fat.groupby('cod_rca')[['valor_venda', 'valor_pedido']].sum().reset_index()
+    df_v_rca = pd.merge(dim_rca[['codigo_rca', 'filial']], fat_rca, left_on='codigo_rca', right_on='cod_rca', how='left').fillna({'valor_venda': 0, 'valor_pedido': 0})
     
-    df_venda = df_v_rca.groupby('filial')['valor_venda'].sum().reset_index()
-    df_venda.rename(columns={'valor_venda': 'Valor Venda'}, inplace=True)
+    df_venda = df_v_rca.groupby('filial')[['valor_venda', 'valor_pedido']].sum().reset_index()
+    df_venda.rename(columns={'valor_venda': 'Valor Venda', 'valor_pedido': 'Valor Pedido'}, inplace=True)
     
     # 3. CONSOLIDAÇÃO FINAL
-    df_branch = pd.merge(df_meta[['filial', 'Meta']], df_venda[['filial', 'Valor Venda']], on='filial', how='outer').fillna(0)
-    df_branch['% Atingimento'] = np.where(df_branch['Meta'] > 0, df_branch['Valor Venda'] / df_branch['Meta'], 0)
+    df_branch = pd.merge(df_meta[['filial', 'Meta']], df_venda[['filial', 'Valor Pedido', 'Valor Venda']], on='filial', how='outer').fillna(0)
+    
+    # REGRA DE NEGÓCIO: % Atingimento agora é calculado sobre o VALOR PEDIDO
+    df_branch['% Atingimento'] = np.where(df_branch['Meta'] > 0, df_branch['Valor Pedido'] / df_branch['Meta'], 0)
     
     df_branch.rename(columns={'filial': 'Filial'}, inplace=True)
     df_branch['Filial'] = df_branch['Filial'].astype(str)
     
-    return df_branch[['Filial', 'Meta', 'Valor Venda', '% Atingimento']].sort_values(by='% Atingimento', ascending=False)
+    return df_branch[['Filial', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']].sort_values(by='% Atingimento', ascending=False)
 
 # -----------------------------------------------------------------------------
 # CONSOLIDAÇÃO HIERÁRQUICA (Supervisor)
 # -----------------------------------------------------------------------------
 def get_supervisor_performance(df_rca):
     """Consolida as metas e faturamentos através de agregação por Supervisor (Roll-up)."""
-    df_sup = df_rca.groupby('Supervisor')[['Meta', 'Valor Venda']].sum().reset_index()
+    # Agrega também o Valor Pedido
+    df_sup = df_rca.groupby('Supervisor')[['Meta', 'Valor Pedido', 'Valor Venda']].sum().reset_index()
     
-    df_sup['% Atingimento'] = np.where(df_sup['Meta'] > 0, df_sup['Valor Venda'] / df_sup['Meta'], 0)
+    # REGRA DE NEGÓCIO: % Atingimento agora é calculado sobre o VALOR PEDIDO
+    df_sup['% Atingimento'] = np.where(df_sup['Meta'] > 0, df_sup['Valor Pedido'] / df_sup['Meta'], 0)
     return df_sup.sort_values(by='% Atingimento', ascending=False)
 
 # -----------------------------------------------------------------------------
@@ -211,7 +224,9 @@ def main():
     meta_total = meta_rca['meta'].sum() 
     pedido_total = fat['valor_pedido'].sum() # Nova métrica global
     venda_total = fat['valor_venda'].sum() 
-    pct_geral = (venda_total / meta_total) if meta_total > 0 else 0
+    
+    # REGRA DE NEGÓCIO: O Atingimento Geral Macroeconómico passa a refletir a Captação (Pedidos)
+    pct_geral = (pedido_total / meta_total) if meta_total > 0 else 0
 
     # Layout expandido para 4 colunas
     col1, col2, col3, col4 = st.columns(4)
