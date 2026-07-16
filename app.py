@@ -88,6 +88,12 @@ def load_data():
     meta_tv['meta'] = pd.to_numeric(meta_tv['meta'], errors='coerce').fillna(0)
     fat['valor_venda'] = pd.to_numeric(fat['valor_venda'], errors='coerce').fillna(0)
     
+    # Prevenção de quebra: verifica se a coluna valor_pedido foi extraída com sucesso
+    if 'valor_pedido' in fat.columns:
+        fat['valor_pedido'] = pd.to_numeric(fat['valor_pedido'], errors='coerce').fillna(0)
+    else:
+        fat['valor_pedido'] = 0.0
+    
     return dim_rca, dim_tv, meta_rca, meta_tv, fat
 
 # -----------------------------------------------------------------------------
@@ -95,7 +101,8 @@ def load_data():
 # -----------------------------------------------------------------------------
 def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
     # --- Pipeline RCA ---
-    fat_rca = fat.groupby('cod_rca')['valor_venda'].sum().reset_index()
+    # Agrega simultaneamente as duas métricas financeiras (venda e pedido)
+    fat_rca = fat.groupby('cod_rca')[['valor_venda', 'valor_pedido']].sum().reset_index()
     
     # 1. Utiliza dim_rca como tabela base
     df_rca = dim_rca.copy()
@@ -110,6 +117,7 @@ def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
     # 4. Tratamento Numérico
     df_rca['meta'] = df_rca['meta'].fillna(0)
     df_rca['valor_venda'] = df_rca['valor_venda'].fillna(0)
+    df_rca['valor_pedido'] = df_rca['valor_pedido'].fillna(0)
     df_rca['pct_atingimento'] = np.where(df_rca['meta'] > 0, df_rca['valor_venda'] / df_rca['meta'], 0)
     
     # 5. Filtro de Origem (Apenas perfil RCA)
@@ -121,8 +129,8 @@ def process_data(dim_rca, dim_tv, meta_rca, meta_tv, fat):
     else:
         df_rca['supervisor'] = df_rca['supervisor'].fillna('Sem Supervisor')
         
-    df_rca_final = df_rca[['filial', 'nm_rca', 'supervisor', 'meta', 'valor_venda', 'pct_atingimento']].copy()
-    df_rca_final.columns = ['Filial', 'Nome', 'Supervisor', 'Meta', 'Valor Venda', '% Atingimento']
+    df_rca_final = df_rca[['filial', 'nm_rca', 'supervisor', 'meta', 'valor_pedido', 'valor_venda', 'pct_atingimento']].copy()
+    df_rca_final.columns = ['Filial', 'Nome', 'Supervisor', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']
 
     # --- Pipeline Televendas ---
     # Governança de Dados: Televendas contabiliza APENAS pedidos com origem 'TELEMARKETING'
@@ -201,15 +209,19 @@ def main():
 
     # --- CARDS EXECUTIVOS ---
     meta_total = meta_rca['meta'].sum() 
+    pedido_total = fat['valor_pedido'].sum() # Nova métrica global
     venda_total = fat['valor_venda'].sum() 
     pct_geral = (venda_total / meta_total) if meta_total > 0 else 0
 
-    col1, col2, col3 = st.columns(3)
+    # Layout expandido para 4 colunas
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Meta Total", f"R$ {meta_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     with col2:
-        st.metric("Faturamento Realizado", f"R$ {venda_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        st.metric("Total Pedido", f"R$ {pedido_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     with col3:
+        st.metric("Faturamento Realizado", f"R$ {venda_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    with col4:
         delta_color = "normal" if pct_geral >= 1 else "inverse"
         st.metric("% Atingimento Geral", f"{pct_geral * 100:.2f}%", delta=f"{(pct_geral - 1) * 100:.2f}% vs Meta", delta_color=delta_color)
 
@@ -226,6 +238,7 @@ def main():
     column_config = {
         "Filial": st.column_config.TextColumn("Filial"),
         "Meta": st.column_config.NumberColumn("Meta", format="R$ %.2f"),
+        "Valor Pedido": st.column_config.NumberColumn("Valor Pedido", format="R$ %.2f"),
         "Valor Venda": st.column_config.NumberColumn("Valor Venda", format="R$ %.2f"),
         "% Atingimento": st.column_config.ProgressColumn(
             "% Atingimento",
