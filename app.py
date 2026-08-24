@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from streamlit_autorefresh import st_autorefresh
+import os
 
 # -----------------------------------------------------------------------------
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIGURAÇÃO DA PÁGINA E ARQUITETURA
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Dashboard Evento - Fornecedores",
-    page_icon="📦",
+    page_title="Dashboard - Performance Comercial",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -54,226 +55,179 @@ def inject_custom_css():
 # -----------------------------------------------------------------------------
 # CARREGAMENTO E SANEAMENTO DOS DADOS (Data Ingestion & Normalization)
 # -----------------------------------------------------------------------------
-#@st.cache_data(ttl=900)
+@st.cache_data(ttl=900)
 def load_data():
     """
-    Realiza a ingestão e sanitização das dimensões e fatos.
-    Garante o alinhamento de tipos e nomenclatura para evitar Data Loss no JOIN.
+    Ingestão e sanitização das bases de vendas e metas dimensionais.
+    Garante integridade referencial aplicando Type Casting estrito.
     """
-    meta_fornec = pd.read_excel("data/meta_fornecedor.xlsx")
-    meta_sup = pd.read_excel("data/meta_supervisor.xlsx")
-    fat = pd.read_excel("data/fat_total_day.xlsx")
+    # 1. Leitura dos Arquivos (SSOT)
+    df_fatos = pd.read_excel("data/vadas_validade_9_meses.xlsx")
+    df_meta_sup = pd.read_excel("data/meta_supervisor.xlsx")
     
-    # 1. Normalização preventiva de nomenclatura das COLUNAS
-    for df in [meta_fornec, meta_sup, fat]:
-        df.columns = [str(col).strip().lower() for col in df.columns]
+    # 2. Normalização de Nomenclatura das Colunas (Lower case)
+    df_fatos.columns = [str(col).strip().lower() for col in df_fatos.columns]
+    df_meta_sup.columns = [str(col).strip().lower() for col in df_meta_sup.columns]
     
-    # Normalização da chave de fornecedor e meta_supervisor
-    if 'cod_fornec' in meta_fornec.columns:
-        meta_fornec.rename(columns={'cod_fornec': 'codfornec'}, inplace=True)
-    if 'meta_supervisor' in meta_sup.columns:
-        meta_sup.rename(columns={'meta_supervisor': 'meta'}, inplace=True)
+    # 3. Renomeação de Colunas Dimensionais para Padronização
+    df_meta_sup.rename(columns={
+        'cod_filial': 'filial',
+        'supervisores': 'nm_supervisor',
+        'meta supervisão': 'meta'
+    }, inplace=True)
     
-    # 2. Alinhamento da Chave Filial
-    if 'uf_filial' in fat.columns:
-        fat.rename(columns={'uf_filial': 'filial'}, inplace=True)
-    elif 'codfilial' in fat.columns:
-        fat.rename(columns={'codfilial': 'filial'}, inplace=True)
+    if 'uf_filial' in df_fatos.columns:
+        df_fatos.rename(columns={'uf_filial': 'filial'}, inplace=True)
         
-    if 'filial' in meta_fornec.columns:
-        meta_fornec['filial'] = meta_fornec['filial'].astype(str).str.strip().str.upper()
-    if 'filial' in fat.columns:
-        fat['filial'] = fat['filial'].astype(str).str.strip().str.upper()
+    # 4. Type Casting: Chaves de Join
+    for df in [df_fatos, df_meta_sup]:
+        df['filial'] = df['filial'].astype(str).str.strip().str.upper()
+        df['cod_supervisor'] = df['cod_supervisor'].astype(str).str.strip()
         
-    # 3. Alinhamento da Chave Supervisor
-    if 'nm_supervisor' in meta_sup.columns:
-        meta_sup['nm_supervisor'] = meta_sup['nm_supervisor'].astype(str).str.strip().str.upper()
+    # 5. Type Casting: Fatos Financeiros
+    df_fatos['total_valor_pedido'] = pd.to_numeric(df_fatos.get('total_valor_pedido', 0), errors='coerce').fillna(0)
+    df_fatos['total_valor_venda'] = pd.to_numeric(df_fatos.get('total_valor_venda', 0), errors='coerce').fillna(0)
+    df_meta_sup['meta'] = pd.to_numeric(df_meta_sup.get('meta', 0), errors='coerce').fillna(0)
     
-    if 'nm_supervisor' not in fat.columns:
-        fat['nm_supervisor'] = 'SEM SUPERVISOR'
-    else:
-        fat['nm_supervisor'] = fat['nm_supervisor'].astype(str).str.strip().str.upper()
-        
-    # Casting explícito numérico e string
-    meta_fornec['codfornec'] = meta_fornec['codfornec'].astype(str).str.strip()
-    fat['codfornec'] = fat['codfornec'].astype(str).str.strip()
-        
-    meta_fornec['meta'] = pd.to_numeric(meta_fornec['meta'], errors='coerce').fillna(0)
-    meta_sup['meta'] = pd.to_numeric(meta_sup['meta'], errors='coerce').fillna(0)
-    fat['total_valor_pedido'] = pd.to_numeric(fat['total_valor_pedido'], errors='coerce').fillna(0)
-    fat['total_valor_venda'] = pd.to_numeric(fat['total_valor_venda'], errors='coerce').fillna(0)
-        
-    return meta_fornec, meta_sup, fat
+    return df_fatos, df_meta_sup
 
 # -----------------------------------------------------------------------------
-# PROCESSAMENTO DE DADOS (Transformations)
+# PROCESSAMENTO DE DADOS (Transformations & Aggregations)
 # -----------------------------------------------------------------------------
-def process_data(meta_fornec, meta_sup, fat):
+def process_data(df_fatos, df_meta_sup):
     """
-    Gera três níveis distintos de agregação (Grãos) para o Dashboard.
+    Gera dois níveis distintos de agregação (Grãos) para o Dashboard.
     """
-    # --- PIPELINE 1: Visão Filial vs Fornecedor ---
-    fat_agg_filial = fat.groupby(['filial', 'codfornec'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
-    df_fornec = pd.merge(meta_fornec, fat_agg_filial, on=['filial', 'codfornec'], how='left')
+    # --- PIPELINE 1: Visão Ranking de Supervisores (Integração Fato-Dimensão) ---
+    df_sup_fatos = df_fatos.groupby(['filial', 'cod_supervisor'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
+    df_sup = pd.merge(df_sup_fatos, df_meta_sup, on=['filial', 'cod_supervisor'], how='left')
     
-    df_fornec['total_valor_pedido'] = df_fornec['total_valor_pedido'].fillna(0)
-    df_fornec['total_valor_venda'] = df_fornec['total_valor_venda'].fillna(0)
-    
-    df_fornec['pct_atingimento'] = np.where(
-        df_fornec['meta'] > 0, 
-        df_fornec['total_valor_pedido'] / df_fornec['meta'], 
-        0
-    )
-    
-    df_visao_filial = df_fornec[['filial', 'fornecedores', 'meta', 'total_valor_pedido', 'total_valor_venda', 'pct_atingimento']].copy()
-    df_visao_filial.columns = ['Filial', 'Fornecedor', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']
-    df_visao_filial = df_visao_filial[df_visao_filial['Meta'] > 0]
-    
-    # --- PIPELINE 2: Visão Ranking de Supervisores ---
-    fat_agg_sup = fat.groupby(['filial', 'nm_supervisor'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
-    df_sup = pd.merge(fat_agg_sup, meta_sup, on='nm_supervisor', how='left')
     df_sup['meta'] = df_sup['meta'].fillna(0)
+    df_sup['nm_supervisor'] = df_sup['nm_supervisor'].fillna('SEM SUPERVISOR')
     
     df_sup['pct_atingimento'] = np.where(
         df_sup['meta'] > 0, 
-        df_sup['total_valor_pedido'] / df_sup['meta'], 
+        df_sup['total_valor_venda'] / df_sup['meta'], 
         0
     )
     
-    df_visao_sup = df_sup[['filial', 'nm_supervisor', 'meta', 'total_valor_pedido', 'total_valor_venda', 'pct_atingimento']].copy()
-    df_visao_sup.columns = ['Filial', 'Supervisor', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']
-    df_visao_sup = df_visao_sup[df_visao_sup['Meta'] > 0]
+    df_sup = df_sup[['filial', 'cod_supervisor', 'nm_supervisor', 'meta', 'total_valor_pedido', 'total_valor_venda', 'pct_atingimento']]
+    df_sup.columns = ['Filial', 'Cód. Sup', 'Supervisor', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']
 
-    # --- PIPELINE 3: Visão Executiva Resumida por Filial (NOVO) ---
-    # Utilizamos os dados já filtrados e consolidados da visão Fornecedor
-    # para garantir que o macro "bata" perfeitamente com o micro.
-    df_visao_resumo = df_visao_filial.groupby('Filial')[['Meta', 'Valor Pedido', 'Valor Venda']].sum().reset_index()
-    
-    # Recálculo matemático mandatório da métrica não-aditiva
-    df_visao_resumo['% Atingimento'] = np.where(
-        df_visao_resumo['Meta'] > 0, 
-        df_visao_resumo['Valor Pedido'] / df_visao_resumo['Meta'], 
+    # --- PIPELINE 2: Visão Executiva Resumida por Filial ---
+    df_resumo = df_fatos.groupby('filial')[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
+    df_resumo['pct_conversao'] = np.where(
+        df_resumo['total_valor_pedido'] > 0, 
+        df_resumo['total_valor_venda'] / df_resumo['total_valor_pedido'], 
         0
     )
+    df_resumo.columns = ['Filial', 'Valor Pedido', 'Valor Venda', '% Conversão']
     
-    return df_visao_filial, df_visao_sup, df_visao_resumo
+    return df_sup, df_resumo
 
 # -----------------------------------------------------------------------------
-# RENDERIZAÇÃO E INTERFACE GRÁFICA
+# RENDERIZAÇÃO E INTERFACE GRÁFICA (UI)
 # -----------------------------------------------------------------------------
 def main():
     st_autorefresh(interval=60000, limit=500, key="data_refresh")
     inject_custom_css()
     
-    st.title("📦 Acompanhamento de Metas e Performance")
-    st.markdown("Monitoramento consolidado de Captação, Faturamento e Força de Vendas")
+    st.title("📊 Monitoramento de Performance Comercial")
+    st.markdown("Acompanhamento de pedidos vs faturamento cruzado com metas de supervisão.")
     st.divider()
 
     try:
-        meta_fornec, meta_sup, fat = load_data()
-        df_visao_filial, df_visao_sup, df_visao_resumo = process_data(meta_fornec, meta_sup, fat)
+        df_fatos, df_meta_sup = load_data()
+        df_sup, df_resumo = process_data(df_fatos, df_meta_sup)
     except Exception as e:
-        st.error(f"⚠️ Erro de I/O ou Parse. Verifique os arquivos em 'data/'. Log: {e}")
+        st.error(f"⚠️ Erro de I/O ao ler os arquivos da pasta 'data/'. Detalhe técnico: {e}")
         return
 
-    # --- CARDS EXECUTIVOS (KPIs Globais Absolutos) ---
-    # Alteração Arquitetural: Lendo diretamente do Dataframe bruto (SSOT) para ignorar os filtros de "Possui Meta"
-    meta_total = meta_fornec['meta'].sum()
-    pedido_total = fat['total_valor_pedido'].sum()
-    venda_total = fat['total_valor_venda'].sum()
+    # --- CARDS EXECUTIVOS (KPIs Globais) ---
+    pedido_total = df_fatos['total_valor_pedido'].sum()
+    venda_total = df_fatos['total_valor_venda'].sum()
+    gap_faturamento = pedido_total - venda_total
     
-    pct_geral = (pedido_total / meta_total) if meta_total > 0 else 0
+    pct_geral = (venda_total / pedido_total) if pedido_total > 0 else 0
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Meta Total (Evento)", f"R$ {meta_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        st.metric("Volume Pedido", f"R$ {pedido_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     with col2:
-        st.metric("Total Captação (Pedidos)", f"R$ {pedido_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    with col3:
         st.metric("Faturamento Efetivado", f"R$ {venda_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    with col3:
+        st.metric("Gap de Faturamento", f"R$ {gap_faturamento:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     with col4:
         delta_color = "normal" if pct_geral >= 1 else "inverse"
-        st.metric("% Atingimento Global", f"{pct_geral * 100:.2f}%", delta=f"{(pct_geral - 1) * 100:.2f}% vs Meta", delta_color=delta_color)
+        st.metric("% Conversão Global", f"{pct_geral * 100:.2f}%", 
+                  delta=f"{(pct_geral - 1) * 100:.2f}% Gap", delta_color=delta_color)
 
     st.divider()
 
     # --- ESTRUTURA DE ABAS ---
-    tab_resumo, tab_filial, tab_sup = st.tabs([
-        "🌎 Resumo Geral", 
-        "🏢 Performance por Fornecedor", 
-        "👔 Ranking de Supervisores"
+    tab_resumo, tab_sup = st.tabs([
+        "🌎 Resumo por Filial", 
+        "👔 Força de Vendas (Supervisores)"
     ])
 
     # Configuração de Colunas Comum
     column_config_base = {
         "Filial": st.column_config.TextColumn("Filial/UF"),
         "Valor Pedido": st.column_config.NumberColumn("Valor Pedido", format="R$ %.2f"),
-        "Valor Venda": st.column_config.NumberColumn("Valor Venda", format="R$ %.2f"),
-        "% Atingimento": st.column_config.ProgressColumn(
-            "% Atingimento",
-            help="Barra de progresso: (Valor Pedido / Meta)",
-            format="%.2f",
-            min_value=0,
-            max_value=1.5,
-        )
+        "Valor Venda": st.column_config.NumberColumn("Valor Venda", format="R$ %.2f")
     }
 
-    # ABA 1 (NOVA): RESUMO EXECUTIVO POR FILIAL
+    # ABA 1: RESUMO EXECUTIVO
     with tab_resumo:
         col_config_resumo = column_config_base.copy()
         col_config_resumo.update({
-            "Meta": st.column_config.NumberColumn("Meta", format="R$ %.2f")
+            "% Conversão": st.column_config.ProgressColumn(
+                "Conversão (Faturado/Pedido)", format="%.2f", min_value=0, max_value=1.0
+            )
         })
-        
         st.dataframe(
-            df_visao_resumo.sort_values(by='% Atingimento', ascending=False), 
-            use_container_width=True, 
-            hide_index=True,
-            column_config=col_config_resumo
+            df_resumo.sort_values(by='% Conversão', ascending=False), 
+            use_container_width=True, hide_index=True, column_config=col_config_resumo
         )
 
-    # ABA 2: PERFORMANCE FILIAL/FORNECEDOR
-    with tab_filial:
-        col_config_filial = column_config_base.copy()
-        col_config_filial.update({
-            "Fornecedor": st.column_config.TextColumn("Fornecedor"),
-            "Meta": st.column_config.NumberColumn("Meta", format="R$ %.2f")
-        })
-        
-        lista_filiais_f = ["Todas"] + sorted(df_visao_filial['Filial'].dropna().unique().tolist())
-        filtro_filial_f = st.selectbox("Filtrar por Filial/UF (Fornecedores):", options=lista_filiais_f, index=0, key='sel_filial')
-        
-        df_view_filial = df_visao_filial if filtro_filial_f == "Todas" else df_visao_filial[df_visao_filial['Filial'] == filtro_filial_f]
-            
-        st.dataframe(
-            df_view_filial.sort_values(by=['% Atingimento', 'Meta'], ascending=[False, False]), 
-            use_container_width=True, 
-            hide_index=True,
-            column_config=col_config_filial
-        )
-
-    # ABA 3: RANKING DE SUPERVISORES
+    # ABA 2: RANKING DE SUPERVISORES
     with tab_sup:
         col_config_sup = column_config_base.copy()
         col_config_sup.update({
+            "Cód. Sup": st.column_config.TextColumn("Código"),
             "Supervisor": st.column_config.TextColumn("Nome do Supervisor"),
-            "Meta": st.column_config.NumberColumn("Meta", format="R$ %.2f")
+            "Meta": st.column_config.NumberColumn("Meta", format="R$ %.2f"),
+            "% Atingimento": st.column_config.ProgressColumn(
+                "Atingimento da Meta (Real vs Meta)", format="%.2f", min_value=0, max_value=1.5
+            )
         })
         
-        lista_filiais_s = ["Todas"] + sorted(df_visao_sup['Filial'].dropna().unique().tolist())
-        filtro_filial_s = st.selectbox("Filtrar por Filial/UF (Supervisores):", options=lista_filiais_s, index=0, key='sel_sup')
+        filiais_sup = ["Todas"] + sorted(df_sup['Filial'].dropna().unique().tolist())
+        sel_filial_sup = st.selectbox("Filtrar por Filial/UF (Supervisores):", options=filiais_sup, index=0, key='sel_sup')
+        df_view_sup = df_sup if sel_filial_sup == "Todas" else df_sup[df_sup['Filial'] == sel_filial_sup]
         
-        df_view_sup = df_visao_sup if filtro_filial_s == "Todas" else df_visao_sup[df_visao_sup['Filial'] == filtro_filial_s]
-        
-        df_view_sup = df_view_sup.sort_values(by=['% Atingimento', 'Valor Pedido'], ascending=[False, False]).reset_index(drop=True)
+        df_view_sup = df_view_sup.sort_values(by=['% Atingimento', 'Valor Venda'], ascending=[False, False]).reset_index(drop=True)
         df_view_sup.index = df_view_sup.index + 1
         
         st.dataframe(
             df_view_sup, 
-            use_container_width=True, 
-            hide_index=False,
-            column_config=col_config_sup
+            use_container_width=True, hide_index=False, column_config=col_config_sup
         )
+        
+    st.divider()
+    
+    # --- EXPORTAÇÃO DE DADOS (Observabilidade e Distribuição) ---
+    st.subheader("Data Pipeline - Distribuição")
+    if st.button("💾 Exportar Performance de Supervisores para a Rede"):
+        try:
+            target_dir = r"\\192.168.0.*\Arquivos de Usuarios\Compras"
+            os.makedirs(target_dir, exist_ok=True)
+            export_path = os.path.join(target_dir, "export_performance_supervisores.csv")
+            
+            df_sup.to_csv(export_path, index=False, sep=';', decimal=',')
+            st.success(f"Snapshot processado e salvo com sucesso no diretório de destino: `{export_path}`")
+        except Exception as e:
+            st.error(f"Falha de permissão (I/O) ao tentar escrever no diretório da rede. Detalhe técnico: {e}")
 
 if __name__ == "__main__":
     main()
