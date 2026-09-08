@@ -59,7 +59,7 @@ def load_data():
     """
     Ingestão e sanitização das bases de vendas e metas dimensionais.
     """
-    df_fatos = pd.read_excel("data/vadas_validade_9_meses.xlsx")
+    df_fatos = pd.read_excel("data/vadas.xlsx")
     df_meta_sup = pd.read_excel("data/meta_supervisor.xlsx")
     
     df_fatos.columns = [str(col).strip().lower() for col in df_fatos.columns]
@@ -77,7 +77,10 @@ def load_data():
     for df in [df_fatos, df_meta_sup]:
         df['filial'] = df['filial'].astype(str).str.strip().str.upper()
         df['cod_supervisor'] = df['cod_supervisor'].astype(str).str.strip()
-        
+
+    if 'fornecedor' in df_fatos.columns:
+        df_fatos['fornecedor'] = df_fatos['fornecedor'].astype(str).str.strip()
+
     df_fatos['total_valor_pedido'] = pd.to_numeric(df_fatos.get('total_valor_pedido', 0), errors='coerce').fillna(0)
     df_fatos['total_valor_venda'] = pd.to_numeric(df_fatos.get('total_valor_venda', 0), errors='coerce').fillna(0)
     df_meta_sup['meta'] = pd.to_numeric(df_meta_sup.get('meta', 0), errors='coerce').fillna(0)
@@ -138,8 +141,13 @@ def process_data(df_fatos, df_meta_sup):
     
     # Filtra apenas filiais com meta definida
     df_resumo = df_resumo[df_resumo['Meta'] > 0].copy()
-    
-    return df_sup, df_resumo
+
+    # --- PIPELINE 3: Acompanhamento por Fornecedor ---
+    df_forn = df_fatos.groupby(['fornecedor', 'filial'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
+    df_forn = df_forn[['fornecedor', 'filial', 'total_valor_pedido', 'total_valor_venda']]
+    df_forn.columns = ['Fornecedor', 'Filial', 'Valor Pedido', 'Valor Venda']
+
+    return df_sup, df_resumo, df_forn
 
 # -----------------------------------------------------------------------------
 # RENDERIZAÇÃO E INTERFACE GRÁFICA (UI)
@@ -154,7 +162,7 @@ def main():
 
     try:
         df_fatos, df_meta_sup = load_data()
-        df_sup, df_resumo = process_data(df_fatos, df_meta_sup)
+        df_sup, df_resumo, df_forn = process_data(df_fatos, df_meta_sup)
     except Exception as e:
         st.error(f"⚠️ Erro de I/O ao ler os arquivos da pasta 'data/'. Detalhe técnico: {e}")
         return
@@ -181,9 +189,10 @@ def main():
     st.divider()
 
     # --- ESTRUTURA DE ABAS ---
-    tab_resumo, tab_sup = st.tabs([
-        "🌎 Resumo por Filial", 
-        "👔 Força de Vendas (Supervisores)"
+    tab_resumo, tab_sup, tab_forn = st.tabs([
+        "🌎 Resumo por Filial",
+        "👔 Força de Vendas (Supervisores)",
+        "🏭 Acompanhamento por Fornecedor"
     ])
 
     column_config_base = {
@@ -226,8 +235,27 @@ def main():
         df_view_sup.index = df_view_sup.index + 1
         
         st.dataframe(
-            df_view_sup, 
+            df_view_sup,
             use_container_width=True, hide_index=False, column_config=col_config_sup
+        )
+
+    # ABA 3: ACOMPANHAMENTO POR FORNECEDOR
+    with tab_forn:
+        col_config_forn = column_config_base.copy()
+        col_config_forn.update({
+            "Fornecedor": st.column_config.TextColumn("Fornecedor")
+        })
+
+        filiais_forn = ["Todas"] + sorted(df_forn['Filial'].dropna().unique().tolist())
+        sel_filial_forn = st.selectbox("Filtrar por Filial/UF (Fornecedor):", options=filiais_forn, index=0, key='sel_forn')
+        df_view_forn = df_forn if sel_filial_forn == "Todas" else df_forn[df_forn['Filial'] == sel_filial_forn]
+
+        df_view_forn = df_view_forn.sort_values(by='Valor Pedido', ascending=False).reset_index(drop=True)
+        df_view_forn.index = df_view_forn.index + 1
+
+        st.dataframe(
+            df_view_forn[['Filial', 'Fornecedor', 'Valor Pedido', 'Valor Venda']],
+            use_container_width=True, hide_index=False, column_config=col_config_forn
         )
 
 if __name__ == "__main__":
