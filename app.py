@@ -54,7 +54,7 @@ def inject_custom_css():
 # -----------------------------------------------------------------------------
 # CARREGAMENTO E SANEAMENTO DOS DADOS (Data Ingestion & Normalization)
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=900)
+#@st.cache_data(ttl=900)
 def load_data():
     """
     Ingestão e sanitização das bases de vendas e metas dimensionais.
