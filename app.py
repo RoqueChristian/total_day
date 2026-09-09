@@ -52,6 +52,12 @@ def inject_custom_css():
     """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
+# FORMATAÇÃO (Moeda no padrão brasileiro: ponto p/ milhar, vírgula p/ decimal)
+# -----------------------------------------------------------------------------
+def format_moeda_br(valor):
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+# -----------------------------------------------------------------------------
 # CARREGAMENTO E SANEAMENTO DOS DADOS (Data Ingestion & Normalization)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=900)
@@ -176,11 +182,11 @@ def main():
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Volume Pedido", f"R$ {pedido_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        st.metric("Volume Pedido", format_moeda_br(pedido_total))
     with col2:
-        st.metric("Faturamento Efetivado", f"R$ {venda_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        st.metric("Faturamento Efetivado", format_moeda_br(venda_total))
     with col3:
-        st.metric("Meta Total", f"R$ {meta_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        st.metric("Meta Total", format_moeda_br(meta_total))
     with col4:
         delta_color = "normal" if pct_atingimento_geral >= 1 else "inverse"
         st.metric("% Atingimento (Pedidos/Meta)", f"{pct_atingimento_geral * 100:.2f}%", 
@@ -197,22 +203,31 @@ def main():
 
     column_config_base = {
         "Filial": st.column_config.TextColumn("Filial/UF"),
-        "Valor Pedido": st.column_config.NumberColumn("Valor Pedido", format="R$ %.2f"),
-        "Valor Venda": st.column_config.NumberColumn("Valor Venda", format="R$ %.2f")
+        "Valor Pedido": st.column_config.TextColumn("Valor Pedido Digitado", alignment="right"),
+        "Valor Venda": st.column_config.TextColumn("Valor Pedidos Faturados", alignment="right")
     }
+    colunas_moeda = ['Meta', 'Valor Pedido', 'Valor Venda']
+
+    def formatar_moedas(df):
+        df = df.copy()
+        for col in colunas_moeda:
+            if col in df.columns:
+                df[col] = df[col].apply(format_moeda_br)
+        return df
 
     # ABA 1: RESUMO EXECUTIVO (FILIAL)
     with tab_resumo:
         col_config_resumo = column_config_base.copy()
         col_config_resumo.update({
-            "Meta": st.column_config.NumberColumn("Meta", format="R$ %.2f"),
+            "Meta": st.column_config.TextColumn("Meta", alignment="right"),
             "% Atingimento": st.column_config.ProgressColumn(
                 "Atingimento da Meta (Pedido vs Meta)", format="%.2f", min_value=0, max_value=1.5
             )
         })
+        df_view_resumo = df_resumo.sort_values(by='% Atingimento', ascending=False)
         st.dataframe(
-            df_resumo.sort_values(by='% Atingimento', ascending=False), 
-            use_container_width=True, hide_index=True, column_config=col_config_resumo
+            formatar_moedas(df_view_resumo),
+            width='stretch', hide_index=True, column_config=col_config_resumo
         )
 
     # ABA 2: RANKING DE SUPERVISORES
@@ -221,22 +236,22 @@ def main():
         col_config_sup.update({
             "Cód. Sup": st.column_config.TextColumn("Código"),
             "Supervisor": st.column_config.TextColumn("Nome do Supervisor"),
-            "Meta": st.column_config.NumberColumn("Meta", format="R$ %.2f"),
+            "Meta": st.column_config.TextColumn("Meta", alignment="right"),
             "% Atingimento": st.column_config.ProgressColumn(
                 "Atingimento da Meta (Pedido vs Meta)", format="%.2f", min_value=0, max_value=1.5
             )
         })
-        
+
         filiais_sup = ["Todas"] + sorted(df_sup['Filial'].dropna().unique().tolist())
         sel_filial_sup = st.selectbox("Filtrar por Filial/UF (Supervisores):", options=filiais_sup, index=0, key='sel_sup')
         df_view_sup = df_sup if sel_filial_sup == "Todas" else df_sup[df_sup['Filial'] == sel_filial_sup]
-        
+
         df_view_sup = df_view_sup.sort_values(by=['% Atingimento', 'Valor Pedido'], ascending=[False, False]).reset_index(drop=True)
         df_view_sup.index = df_view_sup.index + 1
-        
+
         st.dataframe(
-            df_view_sup,
-            use_container_width=True, hide_index=False, column_config=col_config_sup
+            formatar_moedas(df_view_sup),
+            width='stretch', hide_index=False, column_config=col_config_sup
         )
 
     # ABA 3: ACOMPANHAMENTO POR FORNECEDOR
@@ -254,8 +269,8 @@ def main():
         df_view_forn.index = df_view_forn.index + 1
 
         st.dataframe(
-            df_view_forn[['Filial', 'Fornecedor', 'Valor Pedido', 'Valor Venda']],
-            use_container_width=True, hide_index=False, column_config=col_config_forn
+            formatar_moedas(df_view_forn[['Filial', 'Fornecedor', 'Valor Pedido', 'Valor Venda']]),
+            width='stretch', hide_index=False, column_config=col_config_forn
         )
 
 if __name__ == "__main__":
