@@ -1,0 +1,9 @@
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "dark"
+backgroundColor = "#000000"
+primaryColor = "#1E6FD9"
+baseRadius = "medium"
+showWidgetBorder = true

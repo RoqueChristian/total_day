@@ -1,85 +1,73 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-from streamlit_autorefresh import st_autorefresh
+import logging
+from datetime import datetime
+from pathlib import Path
 
-# -----------------------------------------------------------------------------
-# CONFIGURAÇÃO DA PÁGINA E ARQUITETURA
-# -----------------------------------------------------------------------------
+import altair as alt
+import numpy as np
+import pandas as pd
+import streamlit as st
+
 st.set_page_config(
-    page_title="Dashboard - Performance Comercial",
+    page_title="Performance Comercial",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
 )
 
-# -----------------------------------------------------------------------------
-# INJEÇÃO DE ESTILO CUSTOMIZADO (Clean UI)
-# -----------------------------------------------------------------------------
-def inject_custom_css():
-    st.markdown("""
-        <style>
-        header, [data-testid="stHeader"] {
-            visibility: hidden;
-            height: 0% !important;
-            padding: 0px !important;
-        }
-        .block-container { 
-            padding-top: 1.5rem !important; 
-            padding-bottom: 1rem !important; 
-            max-width: 95% !important; 
-        }
-        [data-testid="stMetricValue"] { 
-            font-size: 28px !important; 
-            font-weight: bold; 
-        }
-        [data-testid="stMetric"] { 
-            background-color: var(--secondary-background-color); 
-            padding: 15px; 
-            border-radius: 8px; 
-            border: 1px solid rgba(128, 128, 128, 0.2); 
-            box-shadow: 2px 2px 10px rgba(0,0,0,0.05); 
-            min-height: 145px !important;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-        }
-        [data-testid="stMetric"] > div {
-            margin-top: auto;
-            margin-bottom: auto;
-        }
-        </style>
-    """, unsafe_allow_html=True)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("total_day")
+
+DATA_DIR = Path(__file__).parent / "data"
+ARQ_VENDAS = DATA_DIR / "vadas.xlsx"
+ARQ_META_SUP = DATA_DIR / "meta_supervisor.xlsx"
+TODAS = "Todas"
+INTERVALO_ATUALIZACAO = 60
+ALTURA_CARD = 125
+
 
 # -----------------------------------------------------------------------------
-# FORMATAÇÃO (Moeda no padrão brasileiro: ponto p/ milhar, vírgula p/ decimal)
+# FORMATAÇÃO
 # -----------------------------------------------------------------------------
 def format_moeda_br(valor):
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+
+def format_pct_br(valor, casas=1, sinal=False):
+    texto = f"{valor * 100:{'+' if sinal else ''}.{casas}f}"
+    return texto.replace(".", ",")
+
+
+def coluna_moeda(label):
+    # "localized" segue o idioma do navegador (pt-BR: 1.234,56); step fixa 2 casas
+    return st.column_config.NumberColumn(label, format="localized", step=0.01)
+
+
+COLUNA_ATINGIMENTO = st.column_config.ProgressColumn(
+    "Atingimento (Pedido / Meta)", format="percent", min_value=0, max_value=1.5
+)
+COLUNA_POSICAO = st.column_config.NumberColumn("Pos.", width="small")
+
+
 # -----------------------------------------------------------------------------
-# CARREGAMENTO E SANEAMENTO DOS DADOS (Data Ingestion & Normalization)
+# CARREGAMENTO E SANEAMENTO DOS DADOS
 # -----------------------------------------------------------------------------
-#@st.cache_data(ttl=900)
-def load_data():
-    """
-    Ingestão e sanitização das bases de vendas e metas dimensionais.
-    """
-    df_fatos = pd.read_excel("data/vadas.xlsx")
-    df_meta_sup = pd.read_excel("data/meta_supervisor.xlsx")
-    
+@st.cache_data(max_entries=2)
+def load_data(mtime_vendas, mtime_meta):
+    # Os mtimes só compõem a chave do cache: o Excel é relido apenas quando o arquivo muda.
+    df_fatos = pd.read_excel(ARQ_VENDAS)
+    df_meta_sup = pd.read_excel(ARQ_META_SUP)
+
     df_fatos.columns = [str(col).strip().lower() for col in df_fatos.columns]
     df_meta_sup.columns = [str(col).strip().lower() for col in df_meta_sup.columns]
-    
+
     df_meta_sup.rename(columns={
         'cod_filial': 'filial',
         'supervisores': 'nm_supervisor',
         'meta supervisão': 'meta'
     }, inplace=True)
-    
+
     if 'uf_filial' in df_fatos.columns:
         df_fatos.rename(columns={'uf_filial': 'filial'}, inplace=True)
-        
+
     for df in [df_fatos, df_meta_sup]:
         df['filial'] = df['filial'].astype(str).str.strip().str.upper()
         df['cod_supervisor'] = df['cod_supervisor'].astype(str).str.strip()
@@ -87,191 +75,253 @@ def load_data():
     if 'fornecedor' in df_fatos.columns:
         df_fatos['fornecedor'] = df_fatos['fornecedor'].astype(str).str.strip()
 
+    if 'cod_rca' in df_fatos.columns:
+        df_fatos['cod_rca'] = df_fatos['cod_rca'].astype(str).str.strip()
+        df_fatos['nm_rca'] = df_fatos['nm_rca'].astype(str).str.strip()
+
     df_fatos['total_valor_pedido'] = pd.to_numeric(df_fatos.get('total_valor_pedido', 0), errors='coerce').fillna(0)
     df_fatos['total_valor_venda'] = pd.to_numeric(df_fatos.get('total_valor_venda', 0), errors='coerce').fillna(0)
     df_meta_sup['meta'] = pd.to_numeric(df_meta_sup.get('meta', 0), errors='coerce').fillna(0)
-    
+
     return df_fatos, df_meta_sup
 
+
 # -----------------------------------------------------------------------------
-# PROCESSAMENTO DE DADOS (Transformations & Aggregations)
+# PROCESSAMENTO DE DADOS
 # -----------------------------------------------------------------------------
 def process_data(df_fatos, df_meta_sup):
-    """
-    Gera os níveis distintos de agregação garantindo integridade dimensional.
-    """
-    # --- PIPELINE 1: Visão Ranking de Supervisores ---
+    # --- PIPELINE 1: Ranking de Supervisores ---
     df_sup_fatos = df_fatos.groupby(['filial', 'cod_supervisor'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
-    
+
     df_sup = pd.merge(df_meta_sup, df_sup_fatos, on=['filial', 'cod_supervisor'], how='left')
-    
+
     df_sup['meta'] = df_sup['meta'].fillna(0)
     df_sup['nm_supervisor'] = df_sup['nm_supervisor'].fillna('SEM SUPERVISOR')
     df_sup['total_valor_pedido'] = df_sup['total_valor_pedido'].fillna(0)
     df_sup['total_valor_venda'] = df_sup['total_valor_venda'].fillna(0)
-    
+
     df_sup['pct_atingimento'] = np.where(
-        df_sup['meta'] > 0, 
-        df_sup['total_valor_pedido'] / df_sup['meta'], 
+        df_sup['meta'] > 0,
+        df_sup['total_valor_pedido'] / df_sup['meta'],
         0
     )
-    
+
     df_sup = df_sup[['filial', 'cod_supervisor', 'nm_supervisor', 'meta', 'total_valor_pedido', 'total_valor_venda', 'pct_atingimento']]
     df_sup.columns = ['Filial', 'Cód. Sup', 'Supervisor', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']
-
-    # Filtra apenas quem tem meta válida
     df_sup = df_sup[df_sup['Meta'] > 0].copy()
 
-    # --- PIPELINE 2: Visão Executiva Resumida por Filial ---
-    # 1. Agrega a Fato por Filial
+    # --- PIPELINE 2: Resumo por Filial ---
     df_resumo_fatos = df_fatos.groupby('filial')[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
-    
-    # 2. Agrega a Dimensão de Meta por Filial
     df_meta_filial = df_meta_sup.groupby('filial')['meta'].sum().reset_index()
-    
-    # 3. Join e Tratamento
+
     df_resumo = pd.merge(df_meta_filial, df_resumo_fatos, on='filial', how='left')
     df_resumo['meta'] = df_resumo['meta'].fillna(0)
     df_resumo['total_valor_pedido'] = df_resumo['total_valor_pedido'].fillna(0)
     df_resumo['total_valor_venda'] = df_resumo['total_valor_venda'].fillna(0)
-    
-    # 4. Cálculo do Atingimento da Filial
+
     df_resumo['pct_atingimento'] = np.where(
-        df_resumo['meta'] > 0, 
-        df_resumo['total_valor_pedido'] / df_resumo['meta'], 
+        df_resumo['meta'] > 0,
+        df_resumo['total_valor_pedido'] / df_resumo['meta'],
         0
     )
-    
+
     df_resumo = df_resumo[['filial', 'meta', 'total_valor_pedido', 'total_valor_venda', 'pct_atingimento']]
     df_resumo.columns = ['Filial', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']
-    
-    # Filtra apenas filiais com meta definida
     df_resumo = df_resumo[df_resumo['Meta'] > 0].copy()
 
-    # --- PIPELINE 3: Acompanhamento por Fornecedor ---
+    # --- PIPELINE 3: Fornecedor ---
     df_forn = df_fatos.groupby(['fornecedor', 'filial'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
-    df_forn = df_forn[['fornecedor', 'filial', 'total_valor_pedido', 'total_valor_venda']]
-    df_forn.columns = ['Fornecedor', 'Filial', 'Valor Pedido', 'Valor Venda']
+    df_forn = df_forn[['filial', 'fornecedor', 'total_valor_pedido', 'total_valor_venda']]
+    df_forn.columns = ['Filial', 'Fornecedor', 'Valor Pedido', 'Valor Venda']
 
-    return df_sup, df_resumo, df_forn
+    # --- PIPELINE 4: RCA ---
+    colunas_rca = ['Filial', 'Cód. RCA', 'RCA', 'Supervisor', 'Valor Pedido', 'Valor Venda']
+    if 'cod_rca' in df_fatos.columns:
+        df_rca = df_fatos.groupby(['filial', 'cod_rca', 'nm_rca', 'nm_supervisor'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
+        df_rca.columns = colunas_rca
+    else:
+        df_rca = pd.DataFrame(columns=colunas_rca)
+
+    return df_sup, df_resumo, df_forn, df_rca
+
 
 # -----------------------------------------------------------------------------
-# RENDERIZAÇÃO E INTERFACE GRÁFICA (UI)
+# COMPONENTES DE UI
 # -----------------------------------------------------------------------------
-def main():
-    st_autorefresh(interval=60000, limit=500, key="data_refresh")
-    inject_custom_css()
-    
-    st.title("📊 Monitoramento de Performance Comercial")
-    st.markdown("Acompanhamento de pedidos vs faturamento cruzado com metas.")
-    st.divider()
+def filtrar_filial(df, filial):
+    return df if filial == TODAS else df[df['Filial'] == filial]
 
+
+def com_ranking(df, ordenar_por):
+    df = df.sort_values(by=ordenar_por, ascending=False).reset_index(drop=True)
+    df.insert(0, 'Pos.', range(1, len(df) + 1))
+    return df
+
+
+def grafico_atingimento(df, categoria):
+    base = alt.Chart(df).encode(
+        y=alt.Y(f"{categoria}:N", sort="-x", title=None),
+        x=alt.X("% Atingimento:Q", title="Atingimento da meta", axis=alt.Axis(format="%")),
+    )
+    barras = base.mark_bar(cornerRadiusEnd=4).encode(
+        color=alt.when(alt.datum["% Atingimento"] >= 1)
+        .then(alt.value("#2E7D32"))
+        .otherwise(alt.value("#8C9BAB")),
+        tooltip=[
+            alt.Tooltip(f"{categoria}:N"),
+            alt.Tooltip("% Atingimento:Q", format=".1%"),
+            alt.Tooltip("Valor Pedido:Q", format=",.2f"),
+            alt.Tooltip("Meta:Q", format=",.2f"),
+        ],
+    )
+    linha_meta = (
+        alt.Chart(pd.DataFrame({"meta": [1.0]}))
+        .mark_rule(strokeDash=[4, 4], color="#C62828")
+        .encode(x="meta:Q")
+    )
+    return (barras + linha_meta).properties(height=alt.Step(32))
+
+
+def cards_kpi(df_resumo_view):
+    pedido_total = df_resumo_view['Valor Pedido'].sum()
+    venda_total = df_resumo_view['Valor Venda'].sum()
+    meta_total = df_resumo_view['Meta'].sum()
+    pct = (pedido_total / meta_total) if meta_total > 0 else 0
+
+    # Altura fixa: só o card de atingimento tem delta, e sem isso ele fica mais alto que os demais
+    estilo_card = {"border": True, "height": ALTURA_CARD}
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Volume Pedido", format_moeda_br(pedido_total), **estilo_card)
+    col2.metric("Faturamento Efetivado", format_moeda_br(venda_total), **estilo_card)
+    col3.metric("Meta Total", format_moeda_br(meta_total), **estilo_card)
+    col4.metric(
+        "Atingimento (Pedidos / Meta)",
+        f"{format_pct_br(pct)}%",
+        delta=f"{format_pct_br(pct - 1, sinal=True)} p.p. vs meta",
+        delta_color="normal",
+        **estilo_card,
+    )
+
+
+# -----------------------------------------------------------------------------
+# PAINEL (reexecutado sozinho a cada INTERVALO_ATUALIZACAO segundos)
+# -----------------------------------------------------------------------------
+@st.fragment(run_every=INTERVALO_ATUALIZACAO)
+def painel():
     try:
-        df_fatos, df_meta_sup = load_data()
-        df_sup, df_resumo, df_forn = process_data(df_fatos, df_meta_sup)
-    except Exception as e:
-        st.error(f"⚠️ Erro de I/O ao ler os arquivos da pasta 'data/'. Detalhe técnico: {e}")
+        mtime_vendas = ARQ_VENDAS.stat().st_mtime
+        mtime_meta = ARQ_META_SUP.stat().st_mtime
+        df_fatos, df_meta_sup = load_data(mtime_vendas, mtime_meta)
+        df_sup, df_resumo, df_forn, df_rca = process_data(df_fatos, df_meta_sup)
+    except FileNotFoundError as e:
+        logger.exception("Arquivo de dados ausente")
+        st.error(f"Arquivo não encontrado: **{Path(e.filename).name}**. Verifique a pasta `data/`.")
+        return
+    except Exception:
+        logger.exception("Falha ao carregar ou processar as bases")
+        st.error(
+            "Não foi possível carregar os dados. Verifique se as planilhas em `data/` "
+            "estão no layout esperado — o detalhe técnico foi registrado no log."
+        )
         return
 
-    # --- CARDS EXECUTIVOS (KPIs Globais) ---
-    pedido_total = df_resumo['Valor Pedido'].sum()
-    venda_total = df_resumo['Valor Venda'].sum()
-    meta_total = df_resumo['Meta'].sum() 
-    
-    pct_atingimento_geral = (pedido_total / meta_total) if meta_total > 0 else 0
+    atualizado_em = datetime.fromtimestamp(mtime_vendas).strftime("%d/%m/%Y às %H:%M")
+    st.caption(f":material/schedule: Dados de vendas atualizados em {atualizado_em} · a tela recarrega a cada {INTERVALO_ATUALIZACAO}s")
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Volume Pedido", format_moeda_br(pedido_total))
-    with col2:
-        st.metric("Faturamento Efetivado", format_moeda_br(venda_total))
-    with col3:
-        st.metric("Meta Total", format_moeda_br(meta_total))
-    with col4:
-        delta_color = "normal" if pct_atingimento_geral >= 1 else "inverse"
-        st.metric("% Atingimento (Pedidos/Meta)", f"{pct_atingimento_geral * 100:.2f}%", 
-                  delta=f"{(pct_atingimento_geral - 1) * 100:.2f}% vs Meta", delta_color=delta_color)
+    filiais = sorted(df_fatos['filial'].dropna().unique().tolist(), key=lambda f: (len(f), f))
+    filial = st.segmented_control(
+        "Filial", options=[TODAS] + filiais, default=TODAS, required=True, key="filtro_filial"
+    )
 
-    st.divider()
+    df_resumo_view = filtrar_filial(df_resumo, filial)
+    if df_resumo_view.empty:
+        st.info(
+            f"A filial {filial} não tem meta cadastrada, então não há indicadores de atingimento. "
+            "Os valores dela aparecem nas abas de RCA e Fornecedores."
+        )
+    else:
+        cards_kpi(df_resumo_view)
 
-    # --- ESTRUTURA DE ABAS ---
-    tab_resumo, tab_sup, tab_forn = st.tabs([
-        "🌎 Resumo por Filial",
-        "👔 Força de Vendas (Supervisores)",
-        "🏭 Acompanhamento por Fornecedor"
-    ])
+    tab_resumo, tab_sup, tab_rca, tab_forn = st.tabs(
+        [
+            ":material/storefront: Resumo por Filial",
+            ":material/groups: Supervisores",
+            ":material/badge: RCA",
+            ":material/factory: Fornecedores",
+        ],
+        key="aba_ativa",
+    )
 
-    column_config_base = {
-        "Filial": st.column_config.TextColumn("Filial/UF"),
-        "Valor Pedido": st.column_config.TextColumn("Valor Pedido Digitado", alignment="right"),
-        "Valor Venda": st.column_config.TextColumn("Valor Pedidos Faturados", alignment="right")
-    }
-    colunas_moeda = ['Meta', 'Valor Pedido', 'Valor Venda']
-
-    def formatar_moedas(df):
-        df = df.copy()
-        for col in colunas_moeda:
-            if col in df.columns:
-                df[col] = df[col].apply(format_moeda_br)
-        return df
-
-    # ABA 1: RESUMO EXECUTIVO (FILIAL)
     with tab_resumo:
-        col_config_resumo = column_config_base.copy()
-        col_config_resumo.update({
-            "Meta": st.column_config.TextColumn("Meta", alignment="right"),
-            "% Atingimento": st.column_config.ProgressColumn(
-                "Atingimento da Meta (Pedido vs Meta)", format="%.2f", min_value=0, max_value=1.5
-            )
-        })
-        df_view_resumo = df_resumo.sort_values(by='% Atingimento', ascending=False)
         st.dataframe(
-            formatar_moedas(df_view_resumo),
-            width='stretch', hide_index=True, column_config=col_config_resumo
+            df_resumo_view.sort_values(by='% Atingimento', ascending=False),
+            width='stretch',
+            hide_index=True,
+            column_config={
+                "Filial": st.column_config.TextColumn("Filial"),
+                "Meta": coluna_moeda("Meta (R$)"),
+                "Valor Pedido": coluna_moeda("Pedido Digitado (R$)"),
+                "Valor Venda": coluna_moeda("Pedido Faturado (R$)"),
+                "% Atingimento": COLUNA_ATINGIMENTO,
+            },
         )
 
-    # ABA 2: RANKING DE SUPERVISORES
     with tab_sup:
-        col_config_sup = column_config_base.copy()
-        col_config_sup.update({
-            "Cód. Sup": st.column_config.TextColumn("Código"),
-            "Supervisor": st.column_config.TextColumn("Nome do Supervisor"),
-            "Meta": st.column_config.TextColumn("Meta", alignment="right"),
-            "% Atingimento": st.column_config.ProgressColumn(
-                "Atingimento da Meta (Pedido vs Meta)", format="%.2f", min_value=0, max_value=1.5
-            )
-        })
-
-        filiais_sup = ["Todas"] + sorted(df_sup['Filial'].dropna().unique().tolist())
-        sel_filial_sup = st.selectbox("Filtrar por Filial/UF (Supervisores):", options=filiais_sup, index=0, key='sel_sup')
-        df_view_sup = df_sup if sel_filial_sup == "Todas" else df_sup[df_sup['Filial'] == sel_filial_sup]
-
-        df_view_sup = df_view_sup.sort_values(by=['% Atingimento', 'Valor Pedido'], ascending=[False, False]).reset_index(drop=True)
-        df_view_sup.index = df_view_sup.index + 1
-
+        df_view_sup = com_ranking(filtrar_filial(df_sup, filial), ['% Atingimento', 'Valor Pedido'])
+        if not df_view_sup.empty:
+            st.altair_chart(grafico_atingimento(df_view_sup, "Supervisor"), width='stretch')
         st.dataframe(
-            formatar_moedas(df_view_sup),
-            width='stretch', hide_index=False, column_config=col_config_sup
+            df_view_sup,
+            width='stretch',
+            hide_index=True,
+            column_config={
+                "Pos.": COLUNA_POSICAO,
+                "Filial": st.column_config.TextColumn("Filial"),
+                "Cód. Sup": st.column_config.TextColumn("Código"),
+                "Supervisor": st.column_config.TextColumn("Supervisor"),
+                "Meta": coluna_moeda("Meta (R$)"),
+                "Valor Pedido": coluna_moeda("Pedido Digitado (R$)"),
+                "Valor Venda": coluna_moeda("Pedido Faturado (R$)"),
+                "% Atingimento": COLUNA_ATINGIMENTO,
+            },
         )
 
-    # ABA 3: ACOMPANHAMENTO POR FORNECEDOR
+    with tab_rca:
+        st.dataframe(
+            com_ranking(filtrar_filial(df_rca, filial), 'Valor Pedido'),
+            width='stretch',
+            hide_index=True,
+            column_config={
+                "Pos.": COLUNA_POSICAO,
+                "Filial": st.column_config.TextColumn("Filial"),
+                "Cód. RCA": st.column_config.TextColumn("Código"),
+                "RCA": st.column_config.TextColumn("RCA"),
+                "Supervisor": st.column_config.TextColumn("Supervisor"),
+                "Valor Pedido": coluna_moeda("Pedido Digitado (R$)"),
+                "Valor Venda": coluna_moeda("Pedido Faturado (R$)"),
+            },
+        )
+
     with tab_forn:
-        col_config_forn = column_config_base.copy()
-        col_config_forn.update({
-            "Fornecedor": st.column_config.TextColumn("Fornecedor")
-        })
-
-        filiais_forn = ["Todas"] + sorted(df_forn['Filial'].dropna().unique().tolist())
-        sel_filial_forn = st.selectbox("Filtrar por Filial/UF (Fornecedor):", options=filiais_forn, index=0, key='sel_forn')
-        df_view_forn = df_forn if sel_filial_forn == "Todas" else df_forn[df_forn['Filial'] == sel_filial_forn]
-
-        df_view_forn = df_view_forn.sort_values(by='Valor Pedido', ascending=False).reset_index(drop=True)
-        df_view_forn.index = df_view_forn.index + 1
-
         st.dataframe(
-            formatar_moedas(df_view_forn[['Filial', 'Fornecedor', 'Valor Pedido', 'Valor Venda']]),
-            width='stretch', hide_index=False, column_config=col_config_forn
+            com_ranking(filtrar_filial(df_forn, filial), 'Valor Pedido'),
+            width='stretch',
+            hide_index=True,
+            column_config={
+                "Pos.": COLUNA_POSICAO,
+                "Filial": st.column_config.TextColumn("Filial"),
+                "Fornecedor": st.column_config.TextColumn("Fornecedor"),
+                "Valor Pedido": coluna_moeda("Pedido Digitado (R$)"),
+                "Valor Venda": coluna_moeda("Pedido Faturado (R$)"),
+            },
         )
+
+
+def main():
+    st.title(":material/monitoring: Performance Comercial")
+    st.caption("Pedidos digitados e faturados cruzados com as metas do evento.")
+    painel()
+
 
 if __name__ == "__main__":
     main()
