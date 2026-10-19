@@ -18,10 +18,27 @@ logger = logging.getLogger("total_day")
 
 DATA_DIR = Path(__file__).parent / "data"
 ARQ_VENDAS = DATA_DIR / "vadas.xlsx"
+ARQ_META_FORN = DATA_DIR / "meta fornecedor filial.xlsx"
+ABA_META_FORN = "Planilha1"
 ARQ_META_SUP = DATA_DIR / "meta_supervisor.xlsx"
+
 TODAS = "Todas"
+OUTROS = "OUTROS"
 INTERVALO_ATUALIZACAO = 60
 ALTURA_CARD = 125
+
+# A meta é definida por praça; PI e MA agrupam duas filiais de venda cada.
+FILIAL_PARA_PRACA = {"2": "PI", "6": "PI", "4": "MA", "5": "MA"}
+ROTULO_PRACA = {
+    "1": "CE 01",
+    "3": "CE 03",
+    "PI": "PI (02/06)",
+    "MA": "MA (04/05)",
+    "7": "BA (07)",
+    "9": "PE (09)",
+}
+
+COLUNAS_VALOR = ['total_valor_pedido', 'total_valor_venda']
 
 
 # -----------------------------------------------------------------------------
@@ -36,6 +53,10 @@ def format_pct_br(valor, casas=1, sinal=False):
     return texto.replace(".", ",")
 
 
+def rotulo_praca(praca):
+    return ROTULO_PRACA.get(praca, praca)
+
+
 def coluna_moeda(label):
     # "localized" segue o idioma do navegador (pt-BR: 1.234,56); step fixa 2 casas
     return st.column_config.NumberColumn(label, format="localized", step=0.01)
@@ -45,111 +66,129 @@ COLUNA_ATINGIMENTO = st.column_config.ProgressColumn(
     "Atingimento (Pedido / Meta)", format="percent", min_value=0, max_value=1.5
 )
 COLUNA_POSICAO = st.column_config.NumberColumn("Pos.", width="small")
+CONFIG_VALORES = {
+    "Meta": coluna_moeda("Meta (R$)"),
+    "Valor Pedido": coluna_moeda("Pedido Digitado (R$)"),
+    "Valor Venda": coluna_moeda("Pedido Faturado (R$)"),
+    "% Atingimento": COLUNA_ATINGIMENTO,
+}
 
 
 # -----------------------------------------------------------------------------
 # CARREGAMENTO E SANEAMENTO DOS DADOS
 # -----------------------------------------------------------------------------
+def _texto(serie):
+    return serie.astype(str).str.strip().str.upper().str.replace(r"\.0$", "", regex=True)
+
+
+def _numero(df, coluna):
+    return pd.to_numeric(df.get(coluna, 0), errors='coerce').fillna(0)
+
+
 @st.cache_data(max_entries=2)
-def load_data(mtime_vendas, mtime_meta):
+def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup):
     # Os mtimes só compõem a chave do cache: o Excel é relido apenas quando o arquivo muda.
-    df_fatos = pd.read_excel(ARQ_VENDAS)
-    df_meta_sup = pd.read_excel(ARQ_META_SUP)
+    vendas = pd.read_excel(ARQ_VENDAS)
+    meta_forn = pd.read_excel(ARQ_META_FORN, sheet_name=ABA_META_FORN)
+    meta_sup = pd.read_excel(ARQ_META_SUP)
 
-    df_fatos.columns = [str(col).strip().lower() for col in df_fatos.columns]
-    df_meta_sup.columns = [str(col).strip().lower() for col in df_meta_sup.columns]
+    for df in [vendas, meta_forn, meta_sup]:
+        df.columns = [str(col).strip().lower() for col in df.columns]
 
-    df_meta_sup.rename(columns={
-        'cod_filial': 'filial',
+    vendas.rename(columns={'uf_filial': 'filial'}, inplace=True)
+    vendas['filial'] = _texto(vendas['filial'])
+    vendas['praca'] = vendas['filial'].map(FILIAL_PARA_PRACA).fillna(vendas['filial'])
+    vendas['codfornec'] = _texto(vendas['codfornec'])
+    vendas['cod_supervisor'] = _texto(vendas['cod_supervisor'])
+    for col in COLUNAS_VALOR:
+        vendas[col] = _numero(vendas, col)
+
+    meta_forn.rename(columns={'cod_filial': 'praca', 'cod_fornecedor': 'codfornec'}, inplace=True)
+    meta_forn['praca'] = _texto(meta_forn['praca'])
+    meta_forn['codfornec'] = _texto(meta_forn['codfornec'])
+    meta_forn['fornecedor'] = meta_forn['fornecedor'].astype(str).str.strip()
+    meta_forn['grupo'] = meta_forn['grupo'].astype(str).str.strip()
+    meta_forn['meta'] = _numero(meta_forn, 'meta')
+
+    meta_sup.rename(columns={
+        'cod_filial': 'praca',
         'supervisores': 'nm_supervisor',
         'meta supervisão': 'meta'
     }, inplace=True)
+    meta_sup['praca'] = _texto(meta_sup['praca'])
+    meta_sup['cod_supervisor'] = _texto(meta_sup['cod_supervisor'])
+    meta_sup['meta'] = _numero(meta_sup, 'meta')
 
-    if 'uf_filial' in df_fatos.columns:
-        df_fatos.rename(columns={'uf_filial': 'filial'}, inplace=True)
-
-    for df in [df_fatos, df_meta_sup]:
-        df['filial'] = df['filial'].astype(str).str.strip().str.upper()
-        df['cod_supervisor'] = df['cod_supervisor'].astype(str).str.strip()
-
-    if 'fornecedor' in df_fatos.columns:
-        df_fatos['fornecedor'] = df_fatos['fornecedor'].astype(str).str.strip()
-
-    if 'cod_rca' in df_fatos.columns:
-        df_fatos['cod_rca'] = df_fatos['cod_rca'].astype(str).str.strip()
-        df_fatos['nm_rca'] = df_fatos['nm_rca'].astype(str).str.strip()
-
-    df_fatos['total_valor_pedido'] = pd.to_numeric(df_fatos.get('total_valor_pedido', 0), errors='coerce').fillna(0)
-    df_fatos['total_valor_venda'] = pd.to_numeric(df_fatos.get('total_valor_venda', 0), errors='coerce').fillna(0)
-    df_meta_sup['meta'] = pd.to_numeric(df_meta_sup.get('meta', 0), errors='coerce').fillna(0)
-
-    return df_fatos, df_meta_sup
+    return vendas, meta_forn, meta_sup
 
 
 # -----------------------------------------------------------------------------
 # PROCESSAMENTO DE DADOS
 # -----------------------------------------------------------------------------
-def process_data(df_fatos, df_meta_sup):
-    # --- PIPELINE 1: Ranking de Supervisores ---
-    df_sup_fatos = df_fatos.groupby(['filial', 'cod_supervisor'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
+def _atingimento(df):
+    df['% Atingimento'] = np.where(df['Meta'] > 0, df['Valor Pedido'] / df['Meta'], 0)
+    return df
 
-    df_sup = pd.merge(df_meta_sup, df_sup_fatos, on=['filial', 'cod_supervisor'], how='left')
 
-    df_sup['meta'] = df_sup['meta'].fillna(0)
-    df_sup['nm_supervisor'] = df_sup['nm_supervisor'].fillna('SEM SUPERVISOR')
-    df_sup['total_valor_pedido'] = df_sup['total_valor_pedido'].fillna(0)
-    df_sup['total_valor_venda'] = df_sup['total_valor_venda'].fillna(0)
+def _renomear_valores(df):
+    return df.rename(columns={
+        'meta': 'Meta',
+        'total_valor_pedido': 'Valor Pedido',
+        'total_valor_venda': 'Valor Venda',
+    })
 
-    df_sup['pct_atingimento'] = np.where(
-        df_sup['meta'] > 0,
-        df_sup['total_valor_pedido'] / df_sup['meta'],
-        0
+
+def apurar_fornecedores(vendas, meta_forn):
+    # Fornecedor sem meta na praça cai em OUTROS daquela praça.
+    foco = meta_forn.loc[meta_forn['codfornec'] != OUTROS, ['praca', 'codfornec']].assign(foco=True)
+    vendas = vendas.merge(foco, on=['praca', 'codfornec'], how='left')
+    vendas['codfornec_apurado'] = np.where(vendas['foco'].notna(), vendas['codfornec'], OUTROS)
+
+    apurado = (
+        vendas.groupby(['praca', 'codfornec_apurado'])[COLUNAS_VALOR].sum()
+        .reset_index().rename(columns={'codfornec_apurado': 'codfornec'})
     )
+    df = meta_forn.merge(apurado, on=['praca', 'codfornec'], how='outer')
+    df[['meta'] + COLUNAS_VALOR] = df[['meta'] + COLUNAS_VALOR].fillna(0)
+    df['fornecedor'] = df['fornecedor'].fillna(OUTROS)
+    df['grupo'] = df['grupo'].fillna(OUTROS)
+    df.loc[df['codfornec'] == OUTROS, 'fornecedor'] = 'Outros fornecedores'
 
-    df_sup = df_sup[['filial', 'cod_supervisor', 'nm_supervisor', 'meta', 'total_valor_pedido', 'total_valor_venda', 'pct_atingimento']]
-    df_sup.columns = ['Filial', 'Cód. Sup', 'Supervisor', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']
-    df_sup = df_sup[df_sup['Meta'] > 0].copy()
+    df = _atingimento(_renomear_valores(df))
+    df['Filial'] = df['praca'].map(rotulo_praca)
+    return df.rename(columns={'grupo': 'Grupo', 'fornecedor': 'Fornecedor', 'codfornec': 'Cód. Forn'})
 
-    # --- PIPELINE 2: Resumo por Filial ---
-    df_resumo_fatos = df_fatos.groupby('filial')[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
-    df_meta_filial = df_meta_sup.groupby('filial')['meta'].sum().reset_index()
 
-    df_resumo = pd.merge(df_meta_filial, df_resumo_fatos, on='filial', how='left')
-    df_resumo['meta'] = df_resumo['meta'].fillna(0)
-    df_resumo['total_valor_pedido'] = df_resumo['total_valor_pedido'].fillna(0)
-    df_resumo['total_valor_venda'] = df_resumo['total_valor_venda'].fillna(0)
+def apurar_filiais(vendas, meta_forn):
+    meta = meta_forn.groupby('praca')['meta'].sum()
+    apurado = vendas.groupby('praca')[COLUNAS_VALOR].sum()
+    df = pd.concat([meta, apurado], axis=1).fillna(0).reset_index()
+    df = _atingimento(_renomear_valores(df))
+    df['Filial'] = df['praca'].map(rotulo_praca)
+    return df
 
-    df_resumo['pct_atingimento'] = np.where(
-        df_resumo['meta'] > 0,
-        df_resumo['total_valor_pedido'] / df_resumo['meta'],
-        0
-    )
 
-    df_resumo = df_resumo[['filial', 'meta', 'total_valor_pedido', 'total_valor_venda', 'pct_atingimento']]
-    df_resumo.columns = ['Filial', 'Meta', 'Valor Pedido', 'Valor Venda', '% Atingimento']
-    df_resumo = df_resumo[df_resumo['Meta'] > 0].copy()
+def apurar_supervisores(vendas, meta_sup):
+    apurado = vendas.groupby(['praca', 'cod_supervisor'])[COLUNAS_VALOR].sum().reset_index()
+    df = meta_sup.merge(apurado, on=['praca', 'cod_supervisor'], how='left')
+    df[COLUNAS_VALOR] = df[COLUNAS_VALOR].fillna(0)
+    df['nm_supervisor'] = df['nm_supervisor'].fillna('SEM SUPERVISOR')
+    df = _atingimento(_renomear_valores(df))
+    df = df[df['Meta'] > 0].copy()
+    df['Filial'] = df['praca'].map(rotulo_praca)
+    return df.rename(columns={'cod_supervisor': 'Cód. Sup', 'nm_supervisor': 'Supervisor'})
 
-    # --- PIPELINE 3: Fornecedor ---
-    df_forn = df_fatos.groupby(['fornecedor', 'filial'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
-    df_forn = df_forn[['filial', 'fornecedor', 'total_valor_pedido', 'total_valor_venda']]
-    df_forn.columns = ['Filial', 'Fornecedor', 'Valor Pedido', 'Valor Venda']
 
-    # --- PIPELINE 4: RCA ---
-    colunas_rca = ['Filial', 'Cód. RCA', 'RCA', 'Supervisor', 'Valor Pedido', 'Valor Venda']
-    if 'cod_rca' in df_fatos.columns:
-        df_rca = df_fatos.groupby(['filial', 'cod_rca', 'nm_rca', 'nm_supervisor'])[['total_valor_pedido', 'total_valor_venda']].sum().reset_index()
-        df_rca.columns = colunas_rca
-    else:
-        df_rca = pd.DataFrame(columns=colunas_rca)
-
-    return df_sup, df_resumo, df_forn, df_rca
+def consolidar_por_fornecedor(df_forn):
+    df = df_forn.groupby(['Grupo', 'Fornecedor'])[['Meta', 'Valor Pedido', 'Valor Venda']].sum().reset_index()
+    return _atingimento(df)
 
 
 # -----------------------------------------------------------------------------
 # COMPONENTES DE UI
 # -----------------------------------------------------------------------------
-def filtrar_filial(df, filial):
-    return df if filial == TODAS else df[df['Filial'] == filial]
+def filtrar_praca(df, praca):
+    return df if praca == TODAS else df[df['praca'] == praca]
 
 
 def com_ranking(df, ordenar_por):
@@ -179,13 +218,23 @@ def grafico_atingimento(df, categoria):
         .mark_rule(strokeDash=[4, 4], color="#C62828")
         .encode(x="meta:Q")
     )
-    return (barras + linha_meta).properties(height=alt.Step(32))
+    return (barras + linha_meta).properties(height=alt.Step(28))
 
 
-def cards_kpi(df_resumo_view):
-    pedido_total = df_resumo_view['Valor Pedido'].sum()
-    venda_total = df_resumo_view['Valor Venda'].sum()
-    meta_total = df_resumo_view['Meta'].sum()
+def tabela(df, colunas, config_extra=None):
+    st.dataframe(
+        df,
+        width='stretch',
+        hide_index=True,
+        column_order=colunas,
+        column_config={**CONFIG_VALORES, "Pos.": COLUNA_POSICAO, **(config_extra or {})},
+    )
+
+
+def cards_kpi(df_filiais_view):
+    pedido_total = df_filiais_view['Valor Pedido'].sum()
+    venda_total = df_filiais_view['Valor Venda'].sum()
+    meta_total = df_filiais_view['Meta'].sum()
     pct = (pedido_total / meta_total) if meta_total > 0 else 0
 
     # Altura fixa: só o card de atingimento tem delta, e sem isso ele fica mais alto que os demais
@@ -210,9 +259,12 @@ def cards_kpi(df_resumo_view):
 def painel():
     try:
         mtime_vendas = ARQ_VENDAS.stat().st_mtime
-        mtime_meta = ARQ_META_SUP.stat().st_mtime
-        df_fatos, df_meta_sup = load_data(mtime_vendas, mtime_meta)
-        df_sup, df_resumo, df_forn, df_rca = process_data(df_fatos, df_meta_sup)
+        vendas, meta_forn, meta_sup = load_data(
+            mtime_vendas, ARQ_META_FORN.stat().st_mtime, ARQ_META_SUP.stat().st_mtime
+        )
+        df_filiais = apurar_filiais(vendas, meta_forn)
+        df_forn = apurar_fornecedores(vendas, meta_forn)
+        df_sup = apurar_supervisores(vendas, meta_sup)
     except FileNotFoundError as e:
         logger.exception("Arquivo de dados ausente")
         st.error(f"Arquivo não encontrado: **{Path(e.filename).name}**. Verifique a pasta `data/`.")
@@ -228,93 +280,74 @@ def painel():
     atualizado_em = datetime.fromtimestamp(mtime_vendas).strftime("%d/%m/%Y às %H:%M")
     st.caption(f":material/schedule: Dados de vendas atualizados em {atualizado_em} · a tela recarrega a cada {INTERVALO_ATUALIZACAO}s")
 
-    filiais = sorted(df_fatos['filial'].dropna().unique().tolist(), key=lambda f: (len(f), f))
-    filial = st.segmented_control(
-        "Filial", options=[TODAS] + filiais, default=TODAS, required=True, key="filtro_filial"
+    pracas = [p for p in ROTULO_PRACA if p in set(df_filiais['praca'])]
+    pracas += sorted(set(df_filiais['praca']) - set(pracas))
+    praca = st.segmented_control(
+        "Filial",
+        options=[TODAS] + pracas,
+        default=TODAS,
+        required=True,
+        format_func=rotulo_praca,
+        key="filtro_filial",
     )
 
-    df_resumo_view = filtrar_filial(df_resumo, filial)
-    if df_resumo_view.empty:
-        st.info(
-            f"A filial {filial} não tem meta cadastrada, então não há indicadores de atingimento. "
-            "Os valores dela aparecem nas abas de RCA e Fornecedores."
-        )
-    else:
-        cards_kpi(df_resumo_view)
+    df_filiais_view = filtrar_praca(df_filiais, praca)
+    cards_kpi(df_filiais_view)
 
-    tab_resumo, tab_sup, tab_rca, tab_forn = st.tabs(
+    tab_filial, tab_forn, tab_sup = st.tabs(
         [
-            ":material/storefront: Resumo por Filial",
-            ":material/groups: Supervisores",
-            ":material/badge: RCA",
+            ":material/storefront: Filiais",
             ":material/factory: Fornecedores",
+            ":material/groups: Supervisores",
         ],
         key="aba_ativa",
     )
 
-    with tab_resumo:
-        st.dataframe(
-            df_resumo_view.sort_values(by='% Atingimento', ascending=False),
-            width='stretch',
-            hide_index=True,
-            column_config={
-                "Filial": st.column_config.TextColumn("Filial"),
-                "Meta": coluna_moeda("Meta (R$)"),
-                "Valor Pedido": coluna_moeda("Pedido Digitado (R$)"),
-                "Valor Venda": coluna_moeda("Pedido Faturado (R$)"),
-                "% Atingimento": COLUNA_ATINGIMENTO,
-            },
-        )
-
-    with tab_sup:
-        df_view_sup = com_ranking(filtrar_filial(df_sup, filial), ['% Atingimento', 'Valor Pedido'])
-        if not df_view_sup.empty:
-            st.altair_chart(grafico_atingimento(df_view_sup, "Supervisor"), width='stretch')
-        st.dataframe(
-            df_view_sup,
-            width='stretch',
-            hide_index=True,
-            column_config={
-                "Pos.": COLUNA_POSICAO,
-                "Filial": st.column_config.TextColumn("Filial"),
-                "Cód. Sup": st.column_config.TextColumn("Código"),
-                "Supervisor": st.column_config.TextColumn("Supervisor"),
-                "Meta": coluna_moeda("Meta (R$)"),
-                "Valor Pedido": coluna_moeda("Pedido Digitado (R$)"),
-                "Valor Venda": coluna_moeda("Pedido Faturado (R$)"),
-                "% Atingimento": COLUNA_ATINGIMENTO,
-            },
-        )
-
-    with tab_rca:
-        st.dataframe(
-            com_ranking(filtrar_filial(df_rca, filial), 'Valor Pedido'),
-            width='stretch',
-            hide_index=True,
-            column_config={
-                "Pos.": COLUNA_POSICAO,
-                "Filial": st.column_config.TextColumn("Filial"),
-                "Cód. RCA": st.column_config.TextColumn("Código"),
-                "RCA": st.column_config.TextColumn("RCA"),
-                "Supervisor": st.column_config.TextColumn("Supervisor"),
-                "Valor Pedido": coluna_moeda("Pedido Digitado (R$)"),
-                "Valor Venda": coluna_moeda("Pedido Faturado (R$)"),
-            },
+    with tab_filial:
+        if praca == TODAS:
+            st.altair_chart(grafico_atingimento(df_filiais, "Filial"), width='stretch')
+        tabela(
+            com_ranking(df_filiais_view, ['% Atingimento', 'Valor Pedido']),
+            ["Pos.", "Filial", "Meta", "Valor Pedido", "Valor Venda", "% Atingimento"],
         )
 
     with tab_forn:
-        st.dataframe(
-            com_ranking(filtrar_filial(df_forn, filial), 'Valor Pedido'),
-            width='stretch',
-            hide_index=True,
-            column_config={
-                "Pos.": COLUNA_POSICAO,
-                "Filial": st.column_config.TextColumn("Filial"),
-                "Fornecedor": st.column_config.TextColumn("Fornecedor"),
-                "Valor Pedido": coluna_moeda("Pedido Digitado (R$)"),
-                "Valor Venda": coluna_moeda("Pedido Faturado (R$)"),
-            },
+        # Opções vêm da base inteira para a seleção continuar válida ao trocar de filial
+        fornecedores = sorted(set(df_forn['Fornecedor']) - {'Outros fornecedores'}) + ['Outros fornecedores']
+        selecionados = st.multiselect(
+            "Fornecedor",
+            options=fornecedores,
+            placeholder="Todos os fornecedores",
+            key="filtro_fornecedor",
         )
+
+        df_forn_view = filtrar_praca(df_forn, praca)
+        if selecionados:
+            df_forn_view = df_forn_view[df_forn_view['Fornecedor'].isin(selecionados)]
+
+        if df_forn_view.empty:
+            st.info("Nenhum dos fornecedores selecionados tem meta ou venda nesta filial.")
+        else:
+            consolidado = consolidar_por_fornecedor(df_forn_view)
+            st.altair_chart(grafico_atingimento(consolidado, "Fornecedor"), width='stretch')
+
+            st.markdown("**Por filial**" if praca == TODAS else f"**{rotulo_praca(praca)}**")
+            tabela(
+                com_ranking(df_forn_view, ['% Atingimento', 'Valor Pedido']),
+                ["Pos.", "Filial", "Grupo", "Fornecedor", "Meta", "Valor Pedido", "Valor Venda", "% Atingimento"],
+            )
+
+    with tab_sup:
+        df_sup_view = com_ranking(filtrar_praca(df_sup, praca), ['% Atingimento', 'Valor Pedido'])
+        if df_sup_view.empty:
+            st.info("Nenhum supervisor com meta cadastrada para esta filial.")
+        else:
+            st.altair_chart(grafico_atingimento(df_sup_view, "Supervisor"), width='stretch')
+            tabela(
+                df_sup_view,
+                ["Pos.", "Filial", "Cód. Sup", "Supervisor", "Meta", "Valor Pedido", "Valor Venda", "% Atingimento"],
+                {"Cód. Sup": st.column_config.TextColumn("Código")},
+            )
 
 
 def main():
