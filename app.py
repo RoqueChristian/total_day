@@ -21,6 +21,7 @@ ARQ_VENDAS = DATA_DIR / "vadas.xlsx"
 ARQ_META_FORN = DATA_DIR / "meta fornecedor filial.xlsx"
 ABA_META_FORN = "Planilha1"
 ARQ_META_SUP = DATA_DIR / "meta_supervisor.xlsx"
+ARQ_META_GER = DATA_DIR / "meta_gerente.xlsx"
 
 TODAS = "Todas"
 OUTROS = "OUTROS"
@@ -86,13 +87,14 @@ def _numero(df, coluna):
 
 
 @st.cache_data(max_entries=2)
-def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup):
+def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup, mtime_meta_ger):
     # Os mtimes só compõem a chave do cache: o Excel é relido apenas quando o arquivo muda.
     vendas = pd.read_excel(ARQ_VENDAS)
     meta_forn = pd.read_excel(ARQ_META_FORN, sheet_name=ABA_META_FORN)
     meta_sup = pd.read_excel(ARQ_META_SUP)
+    meta_ger = pd.read_excel(ARQ_META_GER)
 
-    for df in [vendas, meta_forn, meta_sup]:
+    for df in [vendas, meta_forn, meta_sup, meta_ger]:
         df.columns = [str(col).strip().lower() for col in df.columns]
 
     vendas.rename(columns={'uf_filial': 'filial'}, inplace=True)
@@ -100,6 +102,7 @@ def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup):
     vendas['praca'] = vendas['filial'].map(FILIAL_PARA_PRACA).fillna(vendas['filial'])
     vendas['codfornec'] = _texto(vendas['codfornec'])
     vendas['cod_supervisor'] = _texto(vendas['cod_supervisor'])
+    vendas['cod_gerente'] = _texto(vendas['cod_gerente'])
     for col in COLUNAS_VALOR:
         vendas[col] = _numero(vendas, col)
 
@@ -119,7 +122,18 @@ def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup):
     meta_sup['cod_supervisor'] = _texto(meta_sup['cod_supervisor'])
     meta_sup['meta'] = _numero(meta_sup, 'meta')
 
-    return vendas, meta_forn, meta_sup
+    meta_ger.rename(columns={
+        'cod_filial': 'filial',
+        'gerente': 'nm_gerente',
+        'meta gerente': 'meta'
+    }, inplace=True)
+    meta_ger['filial'] = _texto(meta_ger['filial'])
+    meta_ger['praca'] = meta_ger['filial'].map(FILIAL_PARA_PRACA).fillna(meta_ger['filial'])
+    meta_ger['cod_gerente'] = _texto(meta_ger['cod_gerente'])
+    meta_ger['nm_gerente'] = meta_ger['nm_gerente'].astype(str).str.strip()
+    meta_ger['meta'] = _numero(meta_ger, 'meta')
+
+    return vendas, meta_forn, meta_sup, meta_ger
 
 
 # -----------------------------------------------------------------------------
@@ -177,6 +191,22 @@ def apurar_supervisores(vendas, meta_sup):
     df = df[df['Meta'] > 0].copy()
     df['Filial'] = df['praca'].map(rotulo_praca)
     return df.rename(columns={'cod_supervisor': 'Cód. Sup', 'nm_supervisor': 'Supervisor'})
+
+
+def apurar_gerentes(vendas, meta_ger):
+    # Gerente vende em mais de uma filial: a apuração soma pelo código, e a filial é a do cadastro de meta.
+    apurado = vendas.groupby('cod_gerente')[COLUNAS_VALOR].sum().reset_index()
+    df = meta_ger.merge(apurado, on='cod_gerente', how='left')
+    df[COLUNAS_VALOR] = df[COLUNAS_VALOR].fillna(0)
+    df = _atingimento(_renomear_valores(df))
+    df['Filial'] = df['praca'].map(rotulo_praca)
+
+    sem_meta = vendas[~vendas['cod_gerente'].isin(meta_ger['cod_gerente'])]
+    pedido_sem_meta = sem_meta.groupby('cod_gerente')['total_valor_pedido'].sum()
+    pedido_sem_meta = pedido_sem_meta[pedido_sem_meta != 0].sort_values(ascending=False)
+
+    df = df.rename(columns={'cod_gerente': 'Cód. Ger', 'nm_gerente': 'Gerente'})
+    return df, pedido_sem_meta
 
 
 def consolidar_por_fornecedor(df_forn):
@@ -259,11 +289,15 @@ def cards_kpi(df_filiais_view):
 def painel():
     try:
         mtime_vendas = ARQ_VENDAS.stat().st_mtime
-        vendas, meta_forn, meta_sup = load_data(
-            mtime_vendas, ARQ_META_FORN.stat().st_mtime, ARQ_META_SUP.stat().st_mtime
+        vendas, meta_forn, meta_sup, meta_ger = load_data(
+            mtime_vendas,
+            ARQ_META_FORN.stat().st_mtime,
+            ARQ_META_SUP.stat().st_mtime,
+            ARQ_META_GER.stat().st_mtime,
         )
         df_filiais = apurar_filiais(vendas, meta_forn)
         df_forn = apurar_fornecedores(vendas, meta_forn)
+        df_ger, pedido_ger_sem_meta = apurar_gerentes(vendas, meta_ger)
         df_sup = apurar_supervisores(vendas, meta_sup)
     except FileNotFoundError as e:
         logger.exception("Arquivo de dados ausente")
@@ -294,10 +328,11 @@ def painel():
     df_filiais_view = filtrar_praca(df_filiais, praca)
     cards_kpi(df_filiais_view)
 
-    tab_filial, tab_forn, tab_sup = st.tabs(
+    tab_filial, tab_forn, tab_ger, tab_sup = st.tabs(
         [
             ":material/storefront: Filiais",
             ":material/factory: Fornecedores",
+            ":material/supervisor_account: Gerentes",
             ":material/groups: Supervisores",
         ],
         key="aba_ativa",
@@ -335,6 +370,28 @@ def painel():
             tabela(
                 com_ranking(df_forn_view, ['% Atingimento', 'Valor Pedido']),
                 ["Pos.", "Filial", "Grupo", "Fornecedor", "Meta", "Valor Pedido", "Valor Venda", "% Atingimento"],
+            )
+
+    with tab_ger:
+        df_ger_view = com_ranking(filtrar_praca(df_ger, praca), ['% Atingimento', 'Valor Pedido'])
+        if df_ger_view.empty:
+            st.info("Nenhum gerente com meta cadastrada para esta filial.")
+        else:
+            st.altair_chart(grafico_atingimento(df_ger_view, "Gerente"), width='stretch')
+            tabela(
+                df_ger_view,
+                ["Pos.", "Filial", "Cód. Ger", "Gerente", "Meta", "Valor Pedido", "Valor Venda", "% Atingimento"],
+                {"Cód. Ger": st.column_config.TextColumn("Código")},
+            )
+        st.caption(
+            "O pedido de cada gerente soma todas as filiais em que ele vendeu; "
+            "o filtro de filial usa a filial do cadastro de meta."
+        )
+        if not pedido_ger_sem_meta.empty:
+            codigos = ", ".join(pedido_ger_sem_meta.index)
+            st.caption(
+                f":material/info: {format_moeda_br(pedido_ger_sem_meta.sum())} em pedidos de gerentes "
+                f"sem meta cadastrada (códigos {codigos}) não entram nesta aba."
             )
 
     with tab_sup:
