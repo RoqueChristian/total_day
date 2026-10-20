@@ -41,6 +41,8 @@ ROTULO_PRACA = {
 }
 
 COLUNAS_VALOR = ['total_valor_pedido', 'total_valor_venda']
+# Fornecedores cujas vendas não contam na apuração de gerentes (só nessa aba)
+FORNECEDORES_FORA_GERENTE = {"789429"}
 
 
 # -----------------------------------------------------------------------------
@@ -204,6 +206,7 @@ def apurar_supervisores(vendas, meta_sup):
 
 def apurar_gerentes(vendas, meta_ger):
     # Gerente vende em mais de uma filial: a apuração soma pelo código, e a filial é a do cadastro de meta.
+    vendas = vendas[~vendas['codfornec'].isin(FORNECEDORES_FORA_GERENTE)]
     apurado = vendas.groupby('cod_gerente')[COLUNAS_VALOR].sum().reset_index()
     df = meta_ger.merge(apurado, on='cod_gerente', how='left')
     df[COLUNAS_VALOR] = df[COLUNAS_VALOR].fillna(0)
@@ -408,7 +411,8 @@ def painel():
             )
         st.caption(
             "O pedido de cada gerente soma todas as filiais em que ele vendeu; "
-            "o filtro de filial usa a filial do cadastro de meta."
+            "o filtro de filial usa a filial do cadastro de meta. "
+            f"Vendas do fornecedor {', '.join(sorted(FORNECEDORES_FORA_GERENTE))} não entram nesta aba."
         )
         if not pedido_ger_sem_meta.empty:
             codigos = ", ".join(pedido_ger_sem_meta.index)
