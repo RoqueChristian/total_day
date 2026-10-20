@@ -22,6 +22,7 @@ ARQ_META_FORN = DATA_DIR / "meta fornecedor filial.xlsx"
 ABA_META_FORN = "Planilha1"
 ARQ_META_SUP = DATA_DIR / "meta_supervisor.xlsx"
 ARQ_META_GER = DATA_DIR / "meta_gerente.xlsx"
+ARQ_META_RCA = DATA_DIR / "meta_rca.xlsx"
 
 TODAS = "Todas"
 OUTROS = "OUTROS"
@@ -87,14 +88,15 @@ def _numero(df, coluna):
 
 
 @st.cache_data(max_entries=2)
-def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup, mtime_meta_ger):
+def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup, mtime_meta_ger, mtime_meta_rca):
     # Os mtimes só compõem a chave do cache: o Excel é relido apenas quando o arquivo muda.
     vendas = pd.read_excel(ARQ_VENDAS)
     meta_forn = pd.read_excel(ARQ_META_FORN, sheet_name=ABA_META_FORN)
     meta_sup = pd.read_excel(ARQ_META_SUP)
     meta_ger = pd.read_excel(ARQ_META_GER)
+    meta_rca = pd.read_excel(ARQ_META_RCA)
 
-    for df in [vendas, meta_forn, meta_sup, meta_ger]:
+    for df in [vendas, meta_forn, meta_sup, meta_ger, meta_rca]:
         df.columns = [str(col).strip().lower() for col in df.columns]
 
     vendas.rename(columns={'uf_filial': 'filial'}, inplace=True)
@@ -103,6 +105,7 @@ def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup, mtime_meta_ger):
     vendas['codfornec'] = _texto(vendas['codfornec'])
     vendas['cod_supervisor'] = _texto(vendas['cod_supervisor'])
     vendas['cod_gerente'] = _texto(vendas['cod_gerente'])
+    vendas['cod_rca'] = _texto(vendas['cod_rca'])
     for col in COLUNAS_VALOR:
         vendas[col] = _numero(vendas, col)
 
@@ -133,7 +136,13 @@ def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup, mtime_meta_ger):
     meta_ger['nm_gerente'] = meta_ger['nm_gerente'].astype(str).str.strip()
     meta_ger['meta'] = _numero(meta_ger, 'meta')
 
-    return vendas, meta_forn, meta_sup, meta_ger
+    meta_rca.rename(columns={'cod_filial': 'praca', 'meta_rca': 'meta'}, inplace=True)
+    meta_rca['praca'] = _texto(meta_rca['praca'])
+    meta_rca['cod_rca'] = _texto(meta_rca['cod_rca'])
+    meta_rca['nm_rca'] = meta_rca['nm_rca'].astype(str).str.strip()
+    meta_rca['meta'] = _numero(meta_rca, 'meta')
+
+    return vendas, meta_forn, meta_sup, meta_ger, meta_rca
 
 
 # -----------------------------------------------------------------------------
@@ -207,6 +216,17 @@ def apurar_gerentes(vendas, meta_ger):
 
     df = df.rename(columns={'cod_gerente': 'Cód. Ger', 'nm_gerente': 'Gerente'})
     return df, pedido_sem_meta
+
+
+def apurar_rcas(vendas, meta_rca):
+    # Só RCAs com meta; como o gerente, soma o pedido de todas as filiais pelo código.
+    meta_rca = meta_rca[meta_rca['meta'] > 0]
+    apurado = vendas.groupby('cod_rca')[COLUNAS_VALOR].sum().reset_index()
+    df = meta_rca.merge(apurado, on='cod_rca', how='left')
+    df[COLUNAS_VALOR] = df[COLUNAS_VALOR].fillna(0)
+    df = _atingimento(_renomear_valores(df))
+    df['Filial'] = df['praca'].map(rotulo_praca)
+    return df.rename(columns={'cod_rca': 'Cód. RCA', 'nm_rca': 'RCA'})
 
 
 def consolidar_por_fornecedor(df_forn):
@@ -289,12 +309,14 @@ def cards_kpi(df_filiais_view):
 def painel():
     try:
         mtime_vendas = ARQ_VENDAS.stat().st_mtime
-        vendas, meta_forn, meta_sup, meta_ger = load_data(
+        vendas, meta_forn, meta_sup, meta_ger, meta_rca = load_data(
             mtime_vendas,
             ARQ_META_FORN.stat().st_mtime,
             ARQ_META_SUP.stat().st_mtime,
             ARQ_META_GER.stat().st_mtime,
+            ARQ_META_RCA.stat().st_mtime,
         )
+        df_rca = apurar_rcas(vendas, meta_rca)
         df_filiais = apurar_filiais(vendas, meta_forn)
         df_forn = apurar_fornecedores(vendas, meta_forn)
         df_ger, pedido_ger_sem_meta = apurar_gerentes(vendas, meta_ger)
@@ -328,12 +350,13 @@ def painel():
     df_filiais_view = filtrar_praca(df_filiais, praca)
     cards_kpi(df_filiais_view)
 
-    tab_filial, tab_forn, tab_ger, tab_sup = st.tabs(
+    tab_filial, tab_forn, tab_ger, tab_sup, tab_rca = st.tabs(
         [
             ":material/storefront: Filiais",
             ":material/factory: Fornecedores",
             ":material/supervisor_account: Gerentes",
             ":material/groups: Supervisores",
+            ":material/badge: RCA",
         ],
         key="aba_ativa",
     )
@@ -405,6 +428,27 @@ def painel():
                 ["Pos.", "Filial", "Cód. Sup", "Supervisor", "Meta", "Valor Pedido", "Valor Venda", "% Atingimento"],
                 {"Cód. Sup": st.column_config.TextColumn("Código")},
             )
+
+    with tab_rca:
+        df_rca_view = com_ranking(filtrar_praca(df_rca, praca), ['% Atingimento', 'Valor Pedido'])
+        if df_rca_view.empty:
+            st.info("Nenhum RCA com meta cadastrada para esta filial.")
+        else:
+            bateram = int((df_rca_view['% Atingimento'] >= 1).sum())
+            sem_pedido = int((df_rca_view['Valor Pedido'] <= 0).sum())
+            st.markdown(
+                f"**{bateram} de {len(df_rca_view)}** RCAs já bateram a meta · "
+                f"**{sem_pedido}** ainda sem pedido"
+            )
+            tabela(
+                df_rca_view,
+                ["Pos.", "Filial", "Cód. RCA", "RCA", "Meta", "Valor Pedido", "Valor Venda", "% Atingimento"],
+                {"Cód. RCA": st.column_config.TextColumn("Código")},
+            )
+        st.caption(
+            "Exibe apenas RCAs com meta cadastrada. O pedido de cada RCA soma todas as filiais "
+            "em que ele vendeu; o filtro de filial usa a filial do cadastro de meta."
+        )
 
 
 def main():
