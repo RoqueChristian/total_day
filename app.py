@@ -23,6 +23,8 @@ ABA_META_FORN = "Planilha1"
 ARQ_META_SUP = DATA_DIR / "meta_supervisor.xlsx"
 ARQ_META_GER = DATA_DIR / "meta_gerente.xlsx"
 ARQ_META_RCA = DATA_DIR / "meta_rca.xlsx"
+# Desligada: quando False, a aba some e meta_rca.xlsx não é lido
+ABA_RCA_ATIVA = False
 
 TODAS = "Todas"
 OUTROS = "OUTROS"
@@ -41,6 +43,8 @@ ROTULO_PRACA = {
 }
 
 COLUNAS_VALOR = ['total_valor_pedido', 'total_valor_venda']
+# Aba de produtos próximos do vencimento: validade até esta data, inclusive
+VALIDADE_LIMITE = pd.Timestamp("2027-07-31")
 # Fornecedores cujas vendas não contam na apuração de gerentes (só nessa aba)
 FORNECEDORES_FORA_GERENTE = {"789429"}
 
@@ -96,7 +100,10 @@ def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup, mtime_meta_ger, mti
     meta_forn = pd.read_excel(ARQ_META_FORN, sheet_name=ABA_META_FORN)
     meta_sup = pd.read_excel(ARQ_META_SUP)
     meta_ger = pd.read_excel(ARQ_META_GER)
-    meta_rca = pd.read_excel(ARQ_META_RCA)
+    if ABA_RCA_ATIVA:
+        meta_rca = pd.read_excel(ARQ_META_RCA)
+    else:
+        meta_rca = pd.DataFrame(columns=['cod_filial', 'cod_rca', 'nm_rca', 'meta_rca'])
 
     for df in [vendas, meta_forn, meta_sup, meta_ger, meta_rca]:
         df.columns = [str(col).strip().lower() for col in df.columns]
@@ -108,6 +115,9 @@ def load_data(mtime_vendas, mtime_meta_forn, mtime_meta_sup, mtime_meta_ger, mti
     vendas['cod_supervisor'] = _texto(vendas['cod_supervisor'])
     vendas['cod_gerente'] = _texto(vendas['cod_gerente'])
     vendas['cod_rca'] = _texto(vendas['cod_rca'])
+    vendas['cod_prod'] = _texto(vendas['cod_prod'])
+    vendas['nm_produto'] = vendas['nm_produto'].astype(str).str.strip()
+    vendas['data_validade'] = pd.to_datetime(vendas['data_validade'], errors='coerce')
     for col in COLUNAS_VALOR:
         vendas[col] = _numero(vendas, col)
 
@@ -184,8 +194,9 @@ def apurar_fornecedores(vendas, meta_forn):
     return df.rename(columns={'grupo': 'Grupo', 'fornecedor': 'Fornecedor', 'codfornec': 'Cód. Forn'})
 
 
-def apurar_filiais(vendas, meta_forn):
-    meta = meta_forn.groupby('praca')['meta'].sum()
+def apurar_filiais(vendas, meta_sup):
+    # Meta da filial = soma das metas dos supervisores da praça
+    meta = meta_sup.groupby('praca')['meta'].sum()
     apurado = vendas.groupby('praca')[COLUNAS_VALOR].sum()
     df = pd.concat([meta, apurado], axis=1).fillna(0).reset_index()
     df = _atingimento(_renomear_valores(df))
@@ -230,6 +241,23 @@ def apurar_rcas(vendas, meta_rca):
     df = _atingimento(_renomear_valores(df))
     df['Filial'] = df['praca'].map(rotulo_praca)
     return df.rename(columns={'cod_rca': 'Cód. RCA', 'nm_rca': 'RCA'})
+
+
+def apurar_produtos_vencimento(vendas):
+    # Itens sem validade preenchida ficam de fora: não há como saber se estão perto de vencer.
+    proximos = vendas[vendas['data_validade'] <= VALIDADE_LIMITE]
+    df = (
+        proximos.groupby(['praca', 'cod_prod', 'nm_produto'])
+        .agg(
+            data_validade=('data_validade', 'min'),
+            total_valor_pedido=('total_valor_pedido', 'sum'),
+            total_valor_venda=('total_valor_venda', 'sum'),
+        )
+        .reset_index()
+    )
+    df = _renomear_valores(df)
+    df['Filial'] = df['praca'].map(rotulo_praca)
+    return df.rename(columns={'cod_prod': 'Cód. Prod', 'nm_produto': 'Produto', 'data_validade': 'Validade'})
 
 
 def consolidar_por_fornecedor(df_forn):
@@ -317,10 +345,11 @@ def painel():
             ARQ_META_FORN.stat().st_mtime,
             ARQ_META_SUP.stat().st_mtime,
             ARQ_META_GER.stat().st_mtime,
-            ARQ_META_RCA.stat().st_mtime,
+            ARQ_META_RCA.stat().st_mtime if ABA_RCA_ATIVA else 0,
         )
         df_rca = apurar_rcas(vendas, meta_rca)
-        df_filiais = apurar_filiais(vendas, meta_forn)
+        df_filiais = apurar_filiais(vendas, meta_sup)
+        df_prod = apurar_produtos_vencimento(vendas)
         df_forn = apurar_fornecedores(vendas, meta_forn)
         df_ger, pedido_ger_sem_meta = apurar_gerentes(vendas, meta_ger)
         df_sup = apurar_supervisores(vendas, meta_sup)
@@ -353,16 +382,17 @@ def painel():
     df_filiais_view = filtrar_praca(df_filiais, praca)
     cards_kpi(df_filiais_view)
 
-    tab_filial, tab_forn, tab_ger, tab_sup, tab_rca = st.tabs(
-        [
-            ":material/storefront: Filiais",
-            ":material/factory: Fornecedores",
-            ":material/supervisor_account: Gerentes",
-            ":material/groups: Supervisores",
-            ":material/badge: RCA",
-        ],
-        key="aba_ativa",
-    )
+    rotulos_abas = [
+        ":material/storefront: Filiais",
+        ":material/factory: Fornecedores",
+        ":material/supervisor_account: Gerentes",
+        ":material/groups: Supervisores",
+        ":material/event_busy: Produtos a vencer",
+    ]
+    if ABA_RCA_ATIVA:
+        rotulos_abas.append(":material/badge: RCA")
+    abas = st.tabs(rotulos_abas, key="aba_ativa")
+    tab_filial, tab_forn, tab_ger, tab_sup, tab_prod = abas[:5]
 
     with tab_filial:
         if praca == TODAS:
@@ -433,26 +463,60 @@ def painel():
                 {"Cód. Sup": st.column_config.TextColumn("Código")},
             )
 
-    with tab_rca:
-        df_rca_view = com_ranking(filtrar_praca(df_rca, praca), ['% Atingimento', 'Valor Pedido'])
-        if df_rca_view.empty:
-            st.info("Nenhum RCA com meta cadastrada para esta filial.")
-        else:
-            bateram = int((df_rca_view['% Atingimento'] >= 1).sum())
-            sem_pedido = int((df_rca_view['Valor Pedido'] <= 0).sum())
-            st.markdown(
-                f"**{bateram} de {len(df_rca_view)}** RCAs já bateram a meta · "
-                f"**{sem_pedido}** ainda sem pedido"
-            )
-            tabela(
-                df_rca_view,
-                ["Pos.", "Filial", "Cód. RCA", "RCA", "Meta", "Valor Pedido", "Valor Venda", "% Atingimento"],
-                {"Cód. RCA": st.column_config.TextColumn("Código")},
-            )
-        st.caption(
-            "Exibe apenas RCAs com meta cadastrada. O pedido de cada RCA soma todas as filiais "
-            "em que ele vendeu; o filtro de filial usa a filial do cadastro de meta."
+    with tab_prod:
+        aba_produtos(df_prod, praca)
+
+    if ABA_RCA_ATIVA:
+        with abas[5]:
+            aba_rca(df_rca, praca)
+
+
+def aba_produtos(df_prod, praca):
+    limite = VALIDADE_LIMITE.strftime("%d/%m/%Y")
+    df_view = com_ranking(filtrar_praca(df_prod, praca), ['Valor Venda', 'Valor Pedido'])
+    if df_view.empty:
+        st.info(f"Nenhum produto com validade até {limite} vendido nesta filial.")
+    else:
+        vencidos = int((df_view['Validade'] < pd.Timestamp.today().normalize()).sum())
+        st.markdown(
+            f"**{df_view['Cód. Prod'].nunique()}** produtos com validade até {limite} · "
+            f"faturado **{format_moeda_br(df_view['Valor Venda'].sum())}**"
+            + (f" · **{vencidos}** já vencidos" if vencidos else "")
         )
+        tabela(
+            df_view,
+            ["Pos.", "Filial", "Cód. Prod", "Produto", "Validade", "Valor Pedido", "Valor Venda"],
+            {
+                "Cód. Prod": st.column_config.TextColumn("Código"),
+                "Validade": st.column_config.DateColumn("Validade", format="MM/YYYY"),
+            },
+        )
+    st.caption(
+        f"Considera só vendas com validade até {limite}; itens sem validade preenchida na base não aparecem. "
+        "Quando o mesmo produto tem mais de um lote, mostra a validade mais próxima."
+    )
+
+
+def aba_rca(df_rca, praca):
+    df_rca_view = com_ranking(filtrar_praca(df_rca, praca), ['% Atingimento', 'Valor Pedido'])
+    if df_rca_view.empty:
+        st.info("Nenhum RCA com meta cadastrada para esta filial.")
+    else:
+        bateram = int((df_rca_view['% Atingimento'] >= 1).sum())
+        sem_pedido = int((df_rca_view['Valor Pedido'] <= 0).sum())
+        st.markdown(
+            f"**{bateram} de {len(df_rca_view)}** RCAs já bateram a meta · "
+            f"**{sem_pedido}** ainda sem pedido"
+        )
+        tabela(
+            df_rca_view,
+            ["Pos.", "Filial", "Cód. RCA", "RCA", "Meta", "Valor Pedido", "Valor Venda", "% Atingimento"],
+            {"Cód. RCA": st.column_config.TextColumn("Código")},
+        )
+    st.caption(
+        "Exibe apenas RCAs com meta cadastrada. O pedido de cada RCA soma todas as filiais "
+        "em que ele vendeu; o filtro de filial usa a filial do cadastro de meta."
+    )
 
 
 def main():
